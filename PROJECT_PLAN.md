@@ -28,11 +28,11 @@ Build a Python-based trading research and execution stack that can research, bac
    - Setup `pyproject.toml`, virtual environment, linting (ruff), formatting (black), type hints (mypy), and `.env` secret handling.
    - Integrate logging and configuration management (pydantic settings / Hydra / YAML).
 2. **Data Layer**
-   - Provider adapters (e.g., Polygon, Tiingo, AlphaVantage for daily; Polygon or Intrinio for intraday) with rate limit handling.
-   - Date-aligned, split- and dividend-adjusted historical data stored as Parquet per symbol/timeframe.
-
-- Normalize all bar payloads to the IBKR TWS schema (`timestamp`, `open`, `high`, `low`, `close`, `volume`, `average`, `bar_count`) to guarantee drop-in compatibility with the broker.
-- Universe management: S&P 100 constituents with point-in-time membership snapshot.
+  - Provider adapters (e.g., Polygon, Tiingo, AlphaVantage for daily; Polygon or Intrinio for intraday) with rate limit handling.
+  - Date-aligned, split- and dividend-adjusted historical data stored as Parquet per symbol/timeframe.
+  - Normalize all bar payloads to the IBKR TWS schema (`timestamp`, `open`, `high`, `low`, `close`, `volume`, `average`, `bar_count`) to guarantee drop-in compatibility with the broker.
+  - Universe management: S&P 100 constituents with point-in-time membership snapshot.
+  - CLI ingestion utilities (starting with Polygon daily fetcher) writing into deterministic folder structure.
 
 3. **Backtest Engine**
    - Event-driven loop with NYSE calendar and RTH session filtering.
@@ -128,11 +128,12 @@ Build a Python-based trading research and execution stack that can research, bac
 ## Immediate Next Actions (Mean Reversion Sprint)
 
 1. **Environment setup**: initialize repo scaffold (pyproject, lint, venv, .env).
-2. **Data ingestion**: implement daily data adapter, download 3-year S&P 100 dataset, store as Parquet.
-3. **Backtest skeleton**: build event loop, portfolio accounting, and commission/slippage models.
-4. **Mean reversion strategy module**: code signal, position sizing, exits, risk limits with unit tests.
-5. **Experiment #1**: baseline parameter sweep over 2012–2024 (train 2012–2022, validate 2023, test 2024S YTD).
-6. **Reporting**: generate initial performance report and document findings/background assumptions.
+2. **Universe snapshot**: ingest point-in-time S&P 100 membership (CSV/API), persist versioned lists in `data/universe/`; new CLI supports auto-fetching from Wikipedia.
+3. **Daily bars**: bulk-download 3 years of Polygon daily OHLCV for universe constituents into Parquet cache (automated via enhanced `fetch_polygon_daily` CLI).
+4. **Backtest skeleton**: expand the new engine (event loop + portfolio skeleton now in place) with calendar handling and commission/slippage models.
+5. **Mean reversion strategy module**: code signal, position sizing, exits, risk limits with unit tests.
+6. **Experiment #1**: baseline parameter sweep over 2012–2024 (train 2012–2022, validate 2023, test 2024 YTD).
+7. **Reporting**: generate initial performance report and document findings/background assumptions.
 
 ## Backlog (Post Mean Reversion)
 

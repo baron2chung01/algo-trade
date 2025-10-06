@@ -2,9 +2,11 @@
 
 from .base import BaseDataProvider, HistoricalDataRequest
 from .ibkr import IBKRHistoricalDataProvider
+from .polygon import PolygonDailyBarsProvider
 
 __all__ = [
     "BaseDataProvider",
     "HistoricalDataRequest",
     "IBKRHistoricalDataProvider",
+    "PolygonDailyBarsProvider",
 ]
