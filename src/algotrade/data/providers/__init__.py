@@ -2,11 +2,11 @@
 
 from .base import BaseDataProvider, HistoricalDataRequest
 from .ibkr import IBKRHistoricalDataProvider
-from .polygon import PolygonDailyBarsProvider
+from .quantconnect import QuantConnectDailyEquityProvider
 
 __all__ = [
     "BaseDataProvider",
     "HistoricalDataRequest",
     "IBKRHistoricalDataProvider",
-    "PolygonDailyBarsProvider",
+    "QuantConnectDailyEquityProvider",
 ]

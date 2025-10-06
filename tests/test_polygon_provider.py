@@ -6,7 +6,7 @@ import pytest
 
 from algotrade.data.contracts import ContractSpec
 from algotrade.data.providers.base import HistoricalDataRequest
-from algotrade.data.providers.polygon import PolygonDailyBarsProvider
+from algotrade.data.providers.quantconnect import QuantConnectDailyEquityProvider
 
 
 class DummyResponse:
@@ -33,33 +33,34 @@ class DummySession:
         return None
 
 
-def test_polygon_provider_returns_ibkr_formatted_dataframe():
+def test_quantconnect_provider_returns_ibkr_formatted_dataframe():
     payload = {
-        "results": [
+        "success": True,
+        "data": [
             {
-                "t": 1704412800000,  # 2024-01-05 UTC in ms
-                "o": 100.0,
-                "h": 105.0,
-                "l": 99.0,
-                "c": 104.5,
-                "v": 1_234_567,
-                "vw": 102.0,
-                "n": 123,
+                "time": "2024-01-05T00:00:00Z",
+                "open": 100.0,
+                "high": 105.0,
+                "low": 99.0,
+                "close": 104.5,
+                "volume": 1_234_567,
+                "vwap": 102.0,
+                "trades": 123,
             },
             {
-                "t": 1704499200000,  # 2024-01-06 UTC
-                "o": 104.5,
-                "h": 106.0,
-                "l": 103.5,
-                "c": 105.0,
-                "v": 890_000,
-                "vw": 104.5,
-                "n": 98,
+                "time": "2024-01-06T00:00:00Z",
+                "open": 104.5,
+                "high": 106.0,
+                "low": 103.5,
+                "close": 105.0,
+                "volume": 890_000,
+                "vwap": 104.5,
+                "trades": 98,
             },
-        ]
+        ],
     }
     session = DummySession(payload)
-    provider = PolygonDailyBarsProvider(api_key="test", session=session)
+    provider = QuantConnectDailyEquityProvider(user_id="1", api_token="token", session=session)
     request = HistoricalDataRequest(
         contract=ContractSpec(symbol="AAPL"),
         end=datetime(2024, 1, 6, tzinfo=timezone.utc),
@@ -83,11 +84,14 @@ def test_polygon_provider_returns_ibkr_formatted_dataframe():
     assert len(df) == 2
     assert df.iloc[0]["close"] == pytest.approx(104.5)
     assert df.iloc[1]["bar_count"] == 98
-    assert session.calls[0].params["adjusted"] == "true"
+    params = session.calls[0].params
+    assert params["userId"] == "1"
+    assert params["ticker"] == "AAPL"
+    assert params["resolution"] == "Daily"
 
 
-def test_polygon_provider_rejects_unsupported_duration():
-    provider = PolygonDailyBarsProvider(api_key="test", session=DummySession({}))
+def test_quantconnect_provider_rejects_unsupported_duration():
+    provider = QuantConnectDailyEquityProvider(user_id="1", api_token="token", session=DummySession({}))
     request = HistoricalDataRequest(
         contract=ContractSpec(symbol="AAPL"),
         end=datetime(2024, 1, 6, tzinfo=timezone.utc),

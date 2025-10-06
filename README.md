@@ -22,18 +22,18 @@ Python research and execution stack for US equities strategies routed through In
    ```
 
 ## Data providers
-- **Polygon.io**: set `POLYGON_API_KEY` in `.env` to enable daily bar downloads via the `PolygonDailyBarsProvider`. Bars are normalized to the IBKR schema (`timestamp`, `open`, `high`, `low`, `close`, `volume`, `average`, `bar_count`).
+- **QuantConnect Data Library**: set `QUANTCONNECT_USER_ID` and `QUANTCONNECT_API_TOKEN` in `.env` to enable daily bar downloads via the `QuantConnectDailyEquityProvider`. Bars are normalized to the IBKR schema (`timestamp`, `open`, `high`, `low`, `close`, `volume`, `average`, `bar_count`).
 
-### Download daily bars (Polygon)
+### Download daily bars (QuantConnect)
 ````bash
 # Bulk download 3-year lookback for the latest S&P 100 universe
-python -m scripts.fetch_polygon_daily --universe snp100 --years 3
+python -m scripts.fetch_quantconnect_daily --universe snp100 --years 3
 
 # Ad-hoc tickers and custom range
-python -m scripts.fetch_polygon_daily AAPL MSFT --start 2022-01-01 --end 2024-01-01
+python -m scripts.fetch_quantconnect_daily AAPL MSFT --start 2022-01-01 --end 2024-01-01
 ````
 
-Results are written under `data/raw/polygon/daily/` (directories are created automatically). Use `--dry-run` to preview bar counts without touching the filesystem, or `--effective-date` to target an older universe snapshot.
+Results are written under `data/raw/quantconnect/daily/` (directories are created automatically). Use `--dry-run` to preview bar counts without touching the filesystem, or `--effective-date` to target an older universe snapshot. The legacy `fetch_polygon_daily` module now proxies to the QuantConnect downloader for backward compatibility.
 
 ### Ingest universe membership (S&P 100)
 
@@ -81,7 +81,7 @@ class BuyAndHold(Strategy):
       return [Order(symbol="AAPL", quantity=quantity)]
 
 
-store = ParquetBarStore(Path("data/raw/polygon/daily"))
+store = ParquetBarStore(Path("data/raw/quantconnect/daily"))
 engine = BacktestEngine(BacktestConfig(symbols=["AAPL"]), store)
 result = engine.run(BuyAndHold())
 print(f"Final equity: {result.equity_curve[-1][1]:.2f}")

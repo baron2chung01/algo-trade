@@ -21,6 +21,13 @@ class DataPaths(BaseModel):
             path.mkdir(parents=True, exist_ok=True)
 
 
+class QuantConnectCredentials(BaseModel):
+    """Credentials required for QuantConnect data API access."""
+
+    user_id: str
+    api_token: str
+
+
 class AppSettings(BaseSettings):
     """Project-wide settings loaded from environment variables."""
 
@@ -31,15 +38,19 @@ class AppSettings(BaseSettings):
         populate_by_name=True,
     )
 
-    polygon_api_key: str | None = Field(default=None, alias="POLYGON_API_KEY")
+    quantconnect_user_id: str | None = Field(default=None, alias="QUANTCONNECT_USER_ID")
+    quantconnect_api_token: str | None = Field(default=None, alias="QUANTCONNECT_API_TOKEN")
     ibkr_host: str = Field(default="127.0.0.1", alias="IBKR_HOST")
     ibkr_port: int = Field(default=7497, alias="IBKR_PORT")
     ibkr_client_id: int = Field(default=101, alias="IBKR_CLIENT_ID")
     data_paths: DataPaths = Field(default_factory=DataPaths)
 
-    def require_polygon_key(self) -> str:
-        """Return the Polygon API key or raise a helpful error."""
+    def require_quantconnect_credentials(self) -> QuantConnectCredentials:
+        """Return QuantConnect credentials or raise a helpful error."""
 
-        if not self.polygon_api_key:
-            raise RuntimeError("Missing Polygon API key. Set POLYGON_API_KEY in your environment or .env file.")
-        return self.polygon_api_key
+        if not self.quantconnect_user_id or not self.quantconnect_api_token:
+            raise RuntimeError(
+                "Missing QuantConnect credentials. Set QUANTCONNECT_USER_ID and QUANTCONNECT_API_TOKEN "
+                "in your environment or .env file."
+            )
+        return QuantConnectCredentials(user_id=self.quantconnect_user_id, api_token=self.quantconnect_api_token)

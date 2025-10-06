@@ -2,32 +2,33 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from algotrade.config import AppSettings, DataPaths
-from algotrade.data.ingest import ingest_polygon_daily
-from algotrade.data.providers.polygon import PolygonDailyBarsProvider
+from algotrade.data.ingest import ingest_quantconnect_daily
+from algotrade.data.providers.quantconnect import QuantConnectDailyEquityProvider
 
 
-class StubPolygonProvider(PolygonDailyBarsProvider):
+class StubQuantConnectProvider:
     def __init__(self, frames_by_symbol):
         self.frames_by_symbol = frames_by_symbol
         self.closed = False
 
-    def fetch_historical_bars(self, request):  # type: ignore[override]
+    def fetch_historical_bars(self, request):
         symbol = request.contract.symbol
         return self.frames_by_symbol.get(symbol, self.frames_by_symbol.get(symbol.upper()))
 
-    def close(self) -> None:  # type: ignore[override]
+    def close(self) -> None:
         self.closed = True
 
 
 class DummySettings(AppSettings):
     def __init__(self, tmp_path: Path):
         super().__init__(
-            polygon_api_key="dummy",
+            QUANTCONNECT_USER_ID="user",
+            QUANTCONNECT_API_TOKEN="token",
             data_paths=DataPaths(raw=tmp_path / "raw", cache=tmp_path / "cache"),
         )
 
 
-def test_ingest_polygon_daily_writes_parquet(tmp_path, monkeypatch):
+def test_ingest_quantconnect_daily_writes_parquet(tmp_path, monkeypatch):
     import pandas as pd
 
     frames = {
@@ -46,9 +47,15 @@ def test_ingest_polygon_daily_writes_parquet(tmp_path, monkeypatch):
     }
 
     settings = DummySettings(tmp_path)
-    provider = StubPolygonProvider(frames)
+    provider = StubQuantConnectProvider(frames)
 
-    result = ingest_polygon_daily(["AAPL"], date(2024, 1, 5), date(2024, 1, 5), settings=settings, provider=provider)
+    result = ingest_quantconnect_daily(
+        ["AAPL"],
+        date(2024, 1, 5),
+        date(2024, 1, 5),
+        settings=settings,
+        provider=provider,
+    )
 
     assert len(result.paths) == 1
     assert result.paths[0].exists()
@@ -58,22 +65,28 @@ def test_ingest_polygon_daily_writes_parquet(tmp_path, monkeypatch):
     assert provider.closed is False  # Provided provider should not be closed by ingest
 
 
-def test_ingest_polygon_daily_respects_empty_frames(tmp_path):
+def test_ingest_quantconnect_daily_respects_empty_frames(tmp_path):
     import pandas as pd
 
     frames = {
         "AAPL": pd.DataFrame(),
     }
     settings = DummySettings(tmp_path)
-    provider = StubPolygonProvider(frames)
+    provider = StubQuantConnectProvider(frames)
 
-    result = ingest_polygon_daily(["AAPL"], date(2024, 1, 5), date(2024, 1, 5), settings=settings, provider=provider)
+    result = ingest_quantconnect_daily(
+        ["AAPL"],
+        date(2024, 1, 5),
+        date(2024, 1, 5),
+        settings=settings,
+        provider=provider,
+    )
 
     assert result.paths == []
     assert result.frames == {}
 
 
-def test_ingest_polygon_daily_dry_run(tmp_path):
+def test_ingest_quantconnect_daily_dry_run(tmp_path):
     import pandas as pd
 
     frame = pd.DataFrame(
@@ -90,9 +103,9 @@ def test_ingest_polygon_daily_dry_run(tmp_path):
     )
 
     settings = DummySettings(tmp_path)
-    provider = StubPolygonProvider({"AAPL": frame})
+    provider = StubQuantConnectProvider({"AAPL": frame})
 
-    result = ingest_polygon_daily(
+    result = ingest_quantconnect_daily(
         ["AAPL"],
         date(2024, 1, 5),
         date(2024, 1, 5),
@@ -103,5 +116,5 @@ def test_ingest_polygon_daily_dry_run(tmp_path):
 
     assert result.paths == []
     assert "AAPL" in result.frames
-    expected_path = settings.data_paths.raw / "polygon" / "daily" / "AAPL_1d.parquet"
+    expected_path = settings.data_paths.raw / "quantconnect" / "daily" / "AAPL_1d.parquet"
     assert not expected_path.exists()

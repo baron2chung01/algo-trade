@@ -12,7 +12,7 @@ import pandas as pd
 from ..config import AppSettings
 from .contracts import ContractSpec
 from .providers.base import HistoricalDataRequest
-from .providers.polygon import PolygonDailyBarsProvider
+from .providers.quantconnect import QuantConnectDailyEquityProvider
 from .stores.local import ParquetBarStore
 
 
@@ -37,17 +37,17 @@ class IngestResult:
         return len(self.paths)
 
 
-def ingest_polygon_daily(
+def ingest_quantconnect_daily(
     symbols: Iterable[str],
     start: date,
     end: date,
     settings: AppSettings | None = None,
-    provider: PolygonDailyBarsProvider | None = None,
+    provider: QuantConnectDailyEquityProvider | None = None,
     store: ParquetBarStore | None = None,
     *,
     write: bool = True,
 ) -> IngestResult:
-    """Download Polygon daily bars and store them as Parquet files.
+    """Download QuantConnect daily bars and store them as Parquet files.
 
     Parameters
     ----------
@@ -68,11 +68,14 @@ def ingest_polygon_daily(
 
     settings = settings or AppSettings()
     settings.data_paths.ensure()
-    api_key = settings.require_polygon_key()
+    credentials = settings.require_quantconnect_credentials()
 
     created_provider = provider is None
-    provider = provider or PolygonDailyBarsProvider(api_key=api_key)
-    store_root = settings.data_paths.raw / "polygon" / "daily"
+    provider = provider or QuantConnectDailyEquityProvider(
+        user_id=credentials.user_id,
+        api_token=credentials.api_token,
+    )
+    store_root = settings.data_paths.raw / "quantconnect" / "daily"
     store = store if store is not None else (ParquetBarStore(store_root) if write else None)
 
     result = IngestResult()
