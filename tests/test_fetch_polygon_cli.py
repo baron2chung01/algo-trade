@@ -8,8 +8,10 @@ import pandas as pd
 from algotrade.config import AppSettings, DataPaths
 from algotrade.data.universe import ingest_universe_frame
 
-SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "fetch_quantconnect_daily.py"
-_module_spec = util.spec_from_file_location("fetch_quantconnect_daily", SCRIPT_PATH)
+SCRIPT_PATH = Path(__file__).resolve(
+).parents[1] / "scripts" / "fetch_quantconnect_daily.py"
+_module_spec = util.spec_from_file_location(
+    "fetch_quantconnect_daily", SCRIPT_PATH)
 assert _module_spec and _module_spec.loader
 cli = util.module_from_spec(_module_spec)
 _module_spec.loader.exec_module(cli)
@@ -20,7 +22,8 @@ class DummySettings(AppSettings):
         super().__init__(
             QUANTCONNECT_USER_ID="1",
             QUANTCONNECT_API_TOKEN="token",
-            data_paths=DataPaths(raw=tmp_path / "raw", cache=tmp_path / "cache"),
+            data_paths=DataPaths(raw=tmp_path / "raw",
+                                 cache=tmp_path / "cache"),
         )
 
 
@@ -39,7 +42,8 @@ def test_resolve_symbols_prefers_universe(tmp_path):
             "symbol": ["AAPL", "MSFT"],
         }
     )
-    universe_path = ingest_universe_frame(df, settings=settings, universe_name="snp100")
+    universe_path = ingest_universe_frame(
+        df, settings=settings, universe_name="snp100")
 
     base_args = {
         "symbols": [],
@@ -54,5 +58,6 @@ def test_resolve_symbols_prefers_universe(tmp_path):
     base_args["universe"] = None
     base_args["universe_file"] = universe_path
     base_args["effective_date"] = "2024-01-01"
-    resolved_explicit = cli.resolve_symbols(SimpleNamespace(**base_args), settings)
+    resolved_explicit = cli.resolve_symbols(
+        SimpleNamespace(**base_args), settings)
     assert resolved_explicit == ["AAPL", "MSFT"]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -12,6 +12,7 @@ import pandas as pd
 from ..config import AppSettings
 from .contracts import ContractSpec
 from .providers.base import HistoricalDataRequest
+from .providers.polygon import PolygonDailyEquityProvider
 from .providers.quantconnect import QuantConnectDailyEquityProvider
 from .stores.local import ParquetBarStore
 
@@ -74,12 +75,63 @@ def ingest_quantconnect_daily(
     provider = provider or QuantConnectDailyEquityProvider(
         user_id=credentials.user_id,
         api_token=credentials.api_token,
+        organization_id=credentials.organization_id,
     )
     store_root = settings.data_paths.raw / "quantconnect" / "daily"
-    store = store if store is not None else (ParquetBarStore(store_root) if write else None)
+    store = store if store is not None else (
+        ParquetBarStore(store_root) if write else None)
 
     result = IngestResult()
     end_dt = datetime.combine(end, datetime.min.time())
+    duration = _duration_from_dates(start, end)
+
+    for symbol in symbols:
+        normalized_symbol = symbol.upper()
+        request = HistoricalDataRequest(
+            contract=ContractSpec(symbol=normalized_symbol),
+            end=end_dt,
+            duration=duration,
+            bar_size="1 day",
+            what_to_show="TRADES",
+            use_rth=True,
+        )
+        df = provider.fetch_historical_bars(request)
+        if df.empty:
+            continue
+        result.frames[normalized_symbol] = df
+        if store is not None:
+            result.paths.append(store.save(normalized_symbol, "1d", df))
+
+    if created_provider:
+        provider.close()
+    return result
+
+
+def ingest_polygon_daily(
+    symbols: Iterable[str],
+    start: date,
+    end: date,
+    settings: AppSettings | None = None,
+    provider: PolygonDailyEquityProvider | None = None,
+    store: ParquetBarStore | None = None,
+    *,
+    write: bool = True,
+) -> IngestResult:
+    """Download Polygon daily bars and store them as Parquet files."""
+
+    settings = settings or AppSettings()
+    settings.data_paths.ensure()
+    api_key = settings.require_polygon_api_key()
+
+    created_provider = provider is None
+    provider = provider or PolygonDailyEquityProvider(api_key=api_key)
+    store_root = settings.data_paths.raw / "polygon" / "daily"
+    store = store if store is not None else (
+        ParquetBarStore(store_root) if write else None)
+
+    result = IngestResult()
+    end_dt = datetime.combine(end, datetime.min.time()
+                              ).replace(tzinfo=timezone.utc)
     duration = _duration_from_dates(start, end)
 
     for symbol in symbols:

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import List, Sequence, Tuple
 
+from exchange_calendars import ExchangeCalendar, get_calendar
+
 from ..data.stores.local import ParquetBarStore
 from .data import BarSlice, LocalDailyBarFeed
 from .fees import CommissionModel, SlippageModel, ZeroCommission, ZeroSlippage
@@ -22,6 +24,7 @@ class BacktestConfig:
     initial_cash: float = 100_000.0
     commission_model: CommissionModel | None = None
     slippage_model: SlippageModel | None = None
+    calendar_name: str = "XNYS"
 
 
 @dataclass(slots=True)
@@ -41,11 +44,13 @@ class BacktestEngine:
         *,
         commission_model: CommissionModel | None = None,
         slippage_model: SlippageModel | None = None,
+        calendar: ExchangeCalendar | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.commission_model = commission_model or config.commission_model or ZeroCommission()
         self.slippage_model = slippage_model or config.slippage_model or ZeroSlippage()
+        self.calendar = calendar or get_calendar(config.calendar_name)
 
     def _build_feed(self) -> LocalDailyBarFeed:
         return LocalDailyBarFeed(
@@ -54,6 +59,7 @@ class BacktestEngine:
             bar_size=self.config.bar_size,
             start=self.config.start,
             end=self.config.end,
+            calendar=self.calendar,
         )
 
     def run(self, strategy: Strategy) -> BacktestResult:
@@ -69,8 +75,10 @@ class BacktestEngine:
                 if order.symbol not in bar_slice.bars:
                     continue
                 base_price = bar_slice.bars[order.symbol].close
-                fill_price = self.slippage_model.adjust(order.symbol, order.quantity, base_price)
-                commission = self.commission_model.calculate(order.symbol, order.quantity, fill_price)
+                fill_price = self.slippage_model.adjust(
+                    order.symbol, order.quantity, base_price)
+                commission = self.commission_model.calculate(
+                    order.symbol, order.quantity, fill_price)
                 trade = portfolio.execute(
                     order.symbol,
                     order.quantity,

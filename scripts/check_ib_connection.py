@@ -16,7 +16,8 @@ def main() -> None:
     settings = AppSettings()
     ib = IB()
     try:
-        ib.connect(settings.ibkr_host, settings.ibkr_port, clientId=settings.ibkr_client_id)
+        ib.connect(settings.ibkr_host, settings.ibkr_port,
+                   clientId=settings.ibkr_client_id)
         if not ib.isConnected():
             raise RuntimeError("Failed to establish IBKR connection")
         spec = ContractSpec(symbol="AAPL", security_type=SecurityType.STOCK)

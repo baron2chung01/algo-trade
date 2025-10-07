@@ -26,6 +26,7 @@ class QuantConnectCredentials(BaseModel):
 
     user_id: str
     api_token: str
+    organization_id: str | None = None
 
 
 class AppSettings(BaseSettings):
@@ -38,8 +39,13 @@ class AppSettings(BaseSettings):
         populate_by_name=True,
     )
 
-    quantconnect_user_id: str | None = Field(default=None, alias="QUANTCONNECT_USER_ID")
-    quantconnect_api_token: str | None = Field(default=None, alias="QUANTCONNECT_API_TOKEN")
+    quantconnect_user_id: str | None = Field(
+        default=None, alias="QUANTCONNECT_USER_ID")
+    quantconnect_api_token: str | None = Field(
+        default=None, alias="QUANTCONNECT_API_TOKEN")
+    quantconnect_organization_id: str | None = Field(
+        default=None, alias="QUANTCONNECT_ORGANIZATION_ID")
+    polygon_api_key: str | None = Field(default=None, alias="POLYGON_API_KEY")
     ibkr_host: str = Field(default="127.0.0.1", alias="IBKR_HOST")
     ibkr_port: int = Field(default=7497, alias="IBKR_PORT")
     ibkr_client_id: int = Field(default=101, alias="IBKR_CLIENT_ID")
@@ -53,4 +59,17 @@ class AppSettings(BaseSettings):
                 "Missing QuantConnect credentials. Set QUANTCONNECT_USER_ID and QUANTCONNECT_API_TOKEN "
                 "in your environment or .env file."
             )
-        return QuantConnectCredentials(user_id=self.quantconnect_user_id, api_token=self.quantconnect_api_token)
+        return QuantConnectCredentials(
+            user_id=self.quantconnect_user_id,
+            api_token=self.quantconnect_api_token,
+            organization_id=self.quantconnect_organization_id,
+        )
+
+    def require_polygon_api_key(self) -> str:
+        """Return Polygon API key or raise a helpful error."""
+
+        if not self.polygon_api_key:
+            raise RuntimeError(
+                "Missing Polygon API key. Set POLYGON_API_KEY in your environment or .env file."
+            )
+        return self.polygon_api_key

@@ -54,7 +54,8 @@ class Portfolio:
 
     def snapshot(self) -> PortfolioState:
         positions = {
-            symbol: Position(symbol=pos.symbol, quantity=pos.quantity, avg_price=pos.avg_price)
+            symbol: Position(symbol=pos.symbol,
+                             quantity=pos.quantity, avg_price=pos.avg_price)
             for symbol, pos in self.positions.items()
         }
         return PortfolioState(cash=self.cash, positions=positions)

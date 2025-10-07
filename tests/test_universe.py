@@ -61,7 +61,8 @@ def test_ingest_universe_frame_writes_parquet(tmp_path):
         }
     )
     settings = make_settings(tmp_path)
-    target = ingest_universe_frame(df, settings=settings, universe_name="custom")
+    target = ingest_universe_frame(
+        df, settings=settings, universe_name="custom")
     assert target.exists()
     loaded = pd.read_parquet(target)
     assert loaded.shape == (2, 2)

@@ -112,7 +112,8 @@ def fetch_snp100_members(
             break
 
     if table is None:
-        raise ValueError("Unable to locate S&P 100 constituent table in source document")
+        raise ValueError(
+            "Unable to locate S&P 100 constituent table in source document")
 
     df = table.rename(columns={"Ticker symbol": "symbol"})
     df = df[["symbol"]]
@@ -131,7 +132,8 @@ def load_universe(target_path: Path) -> list[UniverseSnapshot]:
     df = _validate_universe_frame(df)
     snapshots: list[UniverseSnapshot] = []
     for effective_date, group in df.groupby("effective_date"):
-        snapshots.append(UniverseSnapshot(effective_date=effective_date, symbols=frozenset(group.symbol)))
+        snapshots.append(UniverseSnapshot(
+            effective_date=effective_date, symbols=frozenset(group.symbol)))
     return snapshots
 
 

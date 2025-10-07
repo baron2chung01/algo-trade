@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, List
 
 import pandas as pd
 
@@ -39,3 +39,19 @@ class ParquetBarStore:
         for symbol, bar_size, df in records:
             written.append(self.save(symbol, bar_size, df))
         return written
+
+    def list_symbols(self, bar_size: str = "1d") -> List[str]:
+        """Return symbols with cached bars for the given bar size."""
+
+        suffix = bar_size.replace(" ", "").lower()
+        pattern = f"*_{suffix}.parquet"
+        symbols: set[str] = set()
+        for path in self.root.glob(pattern):
+            stem = path.stem
+            marker = f"_{suffix}"
+            if not stem.endswith(marker):
+                continue
+            symbol = stem[: -len(marker)]
+            if symbol:
+                symbols.add(symbol.upper())
+        return sorted(symbols)

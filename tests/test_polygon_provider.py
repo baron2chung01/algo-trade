@@ -6,7 +6,7 @@ import pytest
 
 from algotrade.data.contracts import ContractSpec
 from algotrade.data.providers.base import HistoricalDataRequest
-from algotrade.data.providers.quantconnect import QuantConnectDailyEquityProvider
+from algotrade.data.providers.polygon import PolygonDailyEquityProvider
 
 
 class DummyResponse:
@@ -21,46 +21,44 @@ class DummyResponse:
 
 
 class DummySession:
-    def __init__(self, payload):
-        self.payload = payload
+    def __init__(self, payloads):
+        self.payloads = payloads
         self.calls: list[SimpleNamespace] = []
 
     def get(self, url, params=None, timeout=None):
-        self.calls.append(SimpleNamespace(url=url, params=params, timeout=timeout))
-        return DummyResponse(self.payload)
+        key = url
+        payload = self.payloads.get(key)
+        if payload is None:  # pragma: no cover - defensive fallback for unexpected endpoints
+            raise AssertionError(
+                f"Unexpected endpoint in dummy session: {url}")
+        self.calls.append(SimpleNamespace(
+            url=url, params=params, timeout=timeout))
+        return DummyResponse(payload)
 
     def close(self):  # pragma: no cover
         return None
 
 
-def test_quantconnect_provider_returns_ibkr_formatted_dataframe():
+def _build_agg_url(ticker: str, start: str, end: str) -> str:
+    return f"https://api.polygon.io/v2/aggs/ticker/{ticker}/range/1/day/{start}/{end}"
+
+
+def test_polygon_provider_returns_ibkr_formatted_dataframe(monkeypatch):
+    start = "2024-01-04"
+    end = "2024-01-06"
+    url = _build_agg_url("AAPL", start, end)
     payload = {
-        "success": True,
-        "data": [
-            {
-                "time": "2024-01-05T00:00:00Z",
-                "open": 100.0,
-                "high": 105.0,
-                "low": 99.0,
-                "close": 104.5,
-                "volume": 1_234_567,
-                "vwap": 102.0,
-                "trades": 123,
-            },
-            {
-                "time": "2024-01-06T00:00:00Z",
-                "open": 104.5,
-                "high": 106.0,
-                "low": 103.5,
-                "close": 105.0,
-                "volume": 890_000,
-                "vwap": 104.5,
-                "trades": 98,
-            },
+        "status": "OK",
+        "results": [
+            {"t": 1704412800000, "o": 100.0, "h": 105.0, "l": 99.0,
+                "c": 104.5, "v": 1_234_567, "vw": 102.0, "n": 123},
+            {"t": 1704499200000, "o": 104.5, "h": 106.0, "l": 103.5,
+                "c": 105.0, "v": 890_000, "vw": 104.5, "n": 98},
         ],
     }
-    session = DummySession(payload)
-    provider = QuantConnectDailyEquityProvider(user_id="1", api_token="token", session=session)
+    session = DummySession({url: payload})
+    provider = PolygonDailyEquityProvider(
+        api_key="key", session=session, rate_limit_per_minute=0)
     request = HistoricalDataRequest(
         contract=ContractSpec(symbol="AAPL"),
         end=datetime(2024, 1, 6, tzinfo=timezone.utc),
@@ -84,20 +82,44 @@ def test_quantconnect_provider_returns_ibkr_formatted_dataframe():
     assert len(df) == 2
     assert df.iloc[0]["close"] == pytest.approx(104.5)
     assert df.iloc[1]["bar_count"] == 98
-    params = session.calls[0].params
-    assert params["userId"] == "1"
-    assert params["ticker"] == "AAPL"
-    assert params["resolution"] == "Daily"
+    call = session.calls[0]
+    assert call.params["apiKey"] == "key"
+    provider.close()
 
 
-def test_quantconnect_provider_rejects_unsupported_duration():
-    provider = QuantConnectDailyEquityProvider(user_id="1", api_token="token", session=DummySession({}))
+def test_polygon_provider_handles_empty_results():
+    url = _build_agg_url("AAPL", "2024-01-04", "2024-01-05")
+    payload = {"status": "OK", "results": []}
+    session = DummySession({url: payload})
+    provider = PolygonDailyEquityProvider(
+        api_key="key", session=session, rate_limit_per_minute=0)
     request = HistoricalDataRequest(
         contract=ContractSpec(symbol="AAPL"),
-        end=datetime(2024, 1, 6, tzinfo=timezone.utc),
-        duration="1 F",
+        end=datetime(2024, 1, 5, tzinfo=timezone.utc),
+        duration="1 D",
         bar_size="1 day",
     )
 
-    with pytest.raises(ValueError):
+    df = provider.fetch_historical_bars(request)
+
+    assert df.empty
+    provider.close()
+
+
+def test_polygon_provider_raises_on_error():
+    url = _build_agg_url("AAPL", "2024-01-04", "2024-01-05")
+    payload = {"status": "ERROR", "error": "No access"}
+    session = DummySession({url: payload})
+    provider = PolygonDailyEquityProvider(
+        api_key="key", session=session, rate_limit_per_minute=0)
+    request = HistoricalDataRequest(
+        contract=ContractSpec(symbol="AAPL"),
+        end=datetime(2024, 1, 5, tzinfo=timezone.utc),
+        duration="1 D",
+        bar_size="1 day",
+    )
+
+    with pytest.raises(RuntimeError):
         provider.fetch_historical_bars(request)
+
+    provider.close()

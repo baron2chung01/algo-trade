@@ -16,8 +16,10 @@ from algotrade.data.universe import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Ingest a universe membership snapshot into the local cache.")
-    parser.add_argument("csv", nargs="?", type=Path, help="Path to CSV with effective_date,symbol columns")
+    parser = argparse.ArgumentParser(
+        description="Ingest a universe membership snapshot into the local cache.")
+    parser.add_argument("csv", nargs="?", type=Path,
+                        help="Path to CSV with effective_date,symbol columns")
     parser.add_argument(
         "--name",
         default="snp100",
@@ -39,7 +41,8 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
     if not args.fetch_snp100 and args.csv is None:
-        parser.error("CSV path is required unless --fetch-snp100 is specified.")
+        parser.error(
+            "CSV path is required unless --fetch-snp100 is specified.")
     return args
 
 
@@ -47,13 +50,18 @@ def main() -> None:
     args = parse_args()
     settings = AppSettings()
     if args.fetch_snp100:
-        effective = date.fromisoformat(args.effective_date) if args.effective_date else date.today()
-        df = fetch_snp100_members(effective_date=effective, source_url=args.source_url)
-        target = ingest_universe_frame(df, settings=settings, universe_name=args.name)
+        effective = date.fromisoformat(
+            args.effective_date) if args.effective_date else date.today()
+        df = fetch_snp100_members(
+            effective_date=effective, source_url=args.source_url)
+        target = ingest_universe_frame(
+            df, settings=settings, universe_name=args.name)
     else:
         if args.csv is None:  # defensive, parse_args should enforce
-            raise SystemExit("CSV path is required unless --fetch-snp100 is specified.")
-        target = ingest_universe_csv(args.csv, settings=settings, universe_name=args.name)
+            raise SystemExit(
+                "CSV path is required unless --fetch-snp100 is specified.")
+        target = ingest_universe_csv(
+            args.csv, settings=settings, universe_name=args.name)
     print(f"Universe ingested to {target}")
 
 

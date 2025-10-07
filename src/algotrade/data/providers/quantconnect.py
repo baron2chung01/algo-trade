@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import time
 from typing import Optional
 
 import pandas as pd
 import requests
+from requests.auth import HTTPBasicAuth
 
 from ..contracts import ContractSpec
 from ..schemas import IBKRBar, IBKRBarDataFrame
 from .base import BaseDataProvider, HistoricalDataRequest
 
-_QC_BASE_URL = "https://www.quantconnect.com/api/v2/data/read"
+_QC_BASE_API = "https://www.quantconnect.com/api/v2"
+_QC_DATA_ENDPOINT = "data/read"
 _SUPPORTED_BAR_SIZES = {"1 day", "1d", "1D"}
 _DURATION_UNITS = {
     "D": 1,
@@ -20,6 +24,46 @@ _DURATION_UNITS = {
     "M": 30,
     "Y": 365,
 }
+
+
+class _QuantConnectAPI:
+    """Lightweight authenticated client for QuantConnect API v2."""
+
+    def __init__(
+        self,
+        user_id: str,
+        api_token: str,
+        *,
+        session: Optional[requests.Session] = None,
+        base_url: str = _QC_BASE_API,
+    ) -> None:
+        self.user_id = str(user_id)
+        self.api_token = api_token
+        self.base_url = base_url.rstrip("/")
+        self.session = session or requests.Session()
+
+    def _auth(self) -> tuple[dict[str, str], HTTPBasicAuth]:
+        timestamp = str(int(time.time()))
+        hashed_token = hashlib.sha256(
+            f"{self.api_token}:{timestamp}".encode("utf-8")).hexdigest()
+        headers = {"Timestamp": timestamp}
+        auth = HTTPBasicAuth(self.user_id, hashed_token)
+        return headers, auth
+
+    def post(self, endpoint: str, *, json: Optional[dict] = None, timeout: int = 30) -> dict:
+        headers, auth = self._auth()
+        response = self.session.post(
+            f"{self.base_url}/{endpoint.lstrip('/')}",
+            json=json,
+            headers=headers,
+            auth=auth,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def close(self) -> None:
+        self.session.close()
 
 
 def _parse_duration(duration: str) -> timedelta:
@@ -79,16 +123,24 @@ class QuantConnectDailyEquityProvider(BaseDataProvider):
         api_token: str,
         *,
         session: Optional[requests.Session] = None,
-        base_url: str = _QC_BASE_URL,
+        base_url: str = _QC_BASE_API,
+        organization_id: str | None = None,
     ) -> None:
         if not user_id:
-            raise ValueError("QuantConnectDailyEquityProvider requires a user_id.")
+            raise ValueError(
+                "QuantConnectDailyEquityProvider requires a user_id.")
         if not api_token:
-            raise ValueError("QuantConnectDailyEquityProvider requires an api_token.")
-        self.user_id = user_id
+            raise ValueError(
+                "QuantConnectDailyEquityProvider requires an api_token.")
+        self.user_id = str(user_id)
         self.api_token = api_token
-        self.session = session or requests.Session()
-        self.base_url = base_url.rstrip("/")
+        self._organization_id = organization_id
+        self._api = _QuantConnectAPI(
+            self.user_id,
+            self.api_token,
+            session=session,
+            base_url=base_url,
+        )
 
     def fetch_historical_bars(self, request: HistoricalDataRequest) -> pd.DataFrame:
         if request.bar_size not in _SUPPORTED_BAR_SIZES:
@@ -98,24 +150,23 @@ class QuantConnectDailyEquityProvider(BaseDataProvider):
 
         end_dt = _ensure_timezone(request.end)
         start_dt = end_dt - _parse_duration(request.duration)
-        params = {
-            "userId": self.user_id,
-            "apiToken": self.api_token,
-            "ticker": _to_quantconnect_symbol(request.contract),
-            "securityType": "Equity",
-            "market": "usa",
-            "resolution": "Daily",
-            "start": start_dt.strftime("%Y%m%d"),
-            "end": end_dt.strftime("%Y%m%d"),
-            "dataFormat": "LeanCSV",
-        }
-
-        response = self.session.get(self.base_url, params=params, timeout=30)
-        response.raise_for_status()
-        payload = response.json()
+        payload = self._api.post(
+            _QC_DATA_ENDPOINT,
+            json={
+                "ticker": _to_quantconnect_symbol(request.contract),
+                "securityType": "Equity",
+                "market": "usa",
+                "resolution": "Daily",
+                "start": start_dt.strftime("%Y%m%d"),
+                "end": end_dt.strftime("%Y%m%d"),
+                "dataFormat": "LeanCSV",
+                "organizationId": self._resolve_organization_id(),
+            },
+        )
 
         if isinstance(payload, dict) and not payload.get("success", True):
-            message = payload.get("errors") or payload.get("message") or "QuantConnect data request failed"
+            message = payload.get("errors") or payload.get(
+                "message") or "QuantConnect data request failed"
             raise RuntimeError(message)
 
         data = payload.get("data", []) if isinstance(payload, dict) else []
@@ -130,7 +181,8 @@ class QuantConnectDailyEquityProvider(BaseDataProvider):
                     low=float(item.get("low", 0.0)),
                     close=float(item.get("close", 0.0)),
                     volume=float(item.get("volume", 0.0)),
-                    average=float(item.get("vwap")) if item.get("vwap") is not None else None,
+                    average=float(item.get("vwap")) if item.get(
+                        "vwap") is not None else None,
                     bar_count=int(item.get("trades", 0)),
                 )
             )
@@ -138,4 +190,16 @@ class QuantConnectDailyEquityProvider(BaseDataProvider):
         return IBKRBarDataFrame.from_bars(bars)
 
     def close(self) -> None:
-        self.session.close()
+        self._api.close()
+
+    def _resolve_organization_id(self) -> str:
+        if self._organization_id:
+            return self._organization_id
+        account = self._api.post("account/read")
+        organization_id = account.get("organizationId")
+        if not organization_id:
+            raise RuntimeError(
+                "Unable to resolve QuantConnect organization id; ensure your account has an active organization."
+            )
+        self._organization_id = organization_id
+        return organization_id
