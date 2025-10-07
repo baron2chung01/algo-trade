@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import date, datetime, time
-from math import sqrt
+from dataclasses import asdict, dataclass, field
+from datetime import date
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Sequence, Set, Tuple
-
-import statistics
+from typing import Dict, Iterable, List, Sequence, Set, Tuple
 
 import pandas as pd
 
@@ -17,6 +14,7 @@ from ..backtest.engine import BacktestResult
 from ..backtest.fees import CommissionModel, SlippageModel
 from ..data.stores.local import ParquetBarStore
 from ..strategies import MeanReversionConfig, MeanReversionStrategy
+from .metrics import compute_backtest_metrics
 
 MAX_PARAMETER_COMBINATIONS = 10_000
 
@@ -58,7 +56,7 @@ class MeanReversionParameters:
     max_hold_days: int
     target_position_pct: float
     stop_loss_pct: float | None = None
-    lot_size: int = 10
+    lot_size: int = 1
 
     def as_kwargs(self) -> Dict[str, float | int | None]:
         return {
@@ -195,8 +193,14 @@ def run_mean_reversion_experiment(config: MeanReversionExperimentConfig) -> Mean
             strategy = MeanReversionStrategy(strategy_cfg)
             engine = BacktestEngine(config=split_config, store=store)
             backtest_result = engine.run(strategy)
-            metrics = _compute_metrics(
-                backtest_result, split_config.initial_cash, split.start, split.end)
+            metrics = asdict(
+                compute_backtest_metrics(
+                    backtest_result,
+                    initial_cash=split_config.initial_cash,
+                    start=split.start,
+                    end=split.end,
+                )
+            )
             result.rows.append(
                 MeanReversionExperimentRow(
                     split=split.name,
@@ -255,7 +259,7 @@ class OptimizationParameterSpec:
     target_position_pct: ParameterRange
     stop_loss_pct: ParameterRange | None = None
     include_no_stop_loss: bool = True
-    lot_size: int = 10
+    lot_size: int = 1
 
 
 def default_parameter_grid() -> List[MeanReversionParameters]:
@@ -396,9 +400,14 @@ def optimize_mean_reversion_parameters(
     training_metrics["net_profit"] = training_metrics.get(
         "final_equity", 0.0) - initial_cash
 
-    paper_metrics = _compute_metrics(
-        paper_result, initial_cash, paper_split.start, paper_split.end)
-    paper_metrics["net_profit"] = paper_metrics["final_equity"] - initial_cash
+    paper_metrics = asdict(
+        compute_backtest_metrics(
+            paper_result,
+            initial_cash=initial_cash,
+            start=paper_split.start,
+            end=paper_split.end,
+        )
+    )
 
     return OptimizationOutcome(
         best_parameters=best_params,
@@ -409,72 +418,3 @@ def optimize_mean_reversion_parameters(
         paper_window=(paper_split.start, paper_split.end),
         paper_result=paper_result,
     )
-
-
-def _compute_metrics(
-    result: BacktestResult,
-    initial_cash: float,
-    start: date,
-    end: date,
-) -> Dict[str, float]:
-    curve = result.equity_curve
-    final_equity = curve[-1][1] if curve else initial_cash
-    total_return = (final_equity / initial_cash) - 1.0 if initial_cash else 0.0
-    duration_years = _years_between(start, end)
-    if duration_years > 0 and initial_cash > 0 and final_equity > 0:
-        cagr = (final_equity / initial_cash) ** (1 / duration_years) - 1
-    else:
-        cagr = 0.0
-    max_drawdown = _max_drawdown(curve) if curve else 0.0
-    trade_count = float(len(result.trades))
-    cash = result.final_state.cash
-    sharpe = _sharpe_ratio(curve)
-    return {
-        "final_equity": float(final_equity),
-        "total_return": float(total_return),
-        "cagr": float(cagr),
-        "max_drawdown": float(max_drawdown),
-        "trade_count": trade_count,
-        "final_cash": float(cash),
-        "sharpe_ratio": float(sharpe),
-    }
-
-
-def _years_between(start: date, end: date) -> float:
-    delta = (datetime.combine(end, time.min) -
-             datetime.combine(start, time.min)).days
-    return max(delta / 365.25, 1e-6)
-
-
-def _max_drawdown(curve: Sequence[tuple[datetime, float]]) -> float:
-    drawdown = 0.0
-    peak = float("-inf")
-    for _, value in curve:
-        v = float(value)
-        peak = v if peak == float("-inf") else max(peak, v)
-        if peak <= 0:
-            continue
-        drawdown = min(drawdown, (v / peak) - 1.0)
-    return abs(drawdown)
-
-
-def _sharpe_ratio(curve: Sequence[tuple[datetime, float]] | None) -> float:
-    if not curve or len(curve) < 2:
-        return 0.0
-    returns: List[float] = []
-    for idx in range(1, len(curve)):
-        previous = float(curve[idx - 1][1])
-        current = float(curve[idx][1])
-        if previous <= 0:
-            continue
-        daily_return = (current / previous) - 1.0
-        returns.append(daily_return)
-    if not returns:
-        return 0.0
-    mean_return = statistics.fmean(returns)
-    if len(returns) == 1:
-        return 0.0
-    std_dev = statistics.stdev(returns)
-    if std_dev == 0:
-        return 0.0
-    return (mean_return / std_dev) * sqrt(252)

@@ -1,0 +1,219 @@
+{% extends "base.html" %} {% block title %}Mean Reversion Dashboard{% endblock %} {% block page_id %}mean-reversion{% endblock %} {% block head_scripts %}
+<script src="https://cdn.plot.ly/plotly-2.30.0.min.js" defer></script>
+{% endblock %} {% block footer_scripts %}
+<script src="/static/app.js" type="module" defer></script>
+{% endblock %} {% block content %}
+<section class="layout">
+  <aside class="control-panel">
+    <form id="control-form" class="control-form">
+      <input type="hidden" id="strategy" name="strategy" value="mean_reversion" />
+
+      <div class="form-section">
+        <h2 class="form-section-title">Universe</h2>
+        <label>
+          Cached symbols
+          <select id="available-symbols" multiple size="8"></select>
+        </label>
+        <label>
+          Extra symbols
+          <input id="extra-symbols" name="extra_symbols" type="text" placeholder="e.g. NVDA, META" />
+        </label>
+      </div>
+
+      <div class="form-section">
+        <h2 class="form-section-title">Simulation Settings</h2>
+        <div class="form-grid">
+          <label>
+            Initial cash ($)
+            <input name="initial_cash" type="number" min="1000" step="500" value="10000" />
+          </label>
+          <label>
+            Bar limit
+            <input name="limit" type="number" min="0" step="10" value="250" />
+          </label>
+          <label>
+            Paper window (days)
+            <input name="paper_days" type="number" min="60" step="30" value="360" />
+          </label>
+          <label>
+            Training window (years)
+            <input name="training_years" type="number" min="1" step="0.5" value="2" />
+          </label>
+        </div>
+        <label class="form-checkbox">
+          <input id="auto-fetch" name="auto_fetch" type="checkbox" />
+          <span>Download missing Polygon data automatically</span>
+        </label>
+      </div>
+
+      <div class="form-section form-section--params" id="mean-reversion-params">
+        <h2 class="form-section-title">Mean Reversion Parameters</h2>
+        <div class="range-grid">
+          <div class="range-group">
+            <span class="range-title">Entry Threshold (RSI)</span>
+            <label>
+              Min
+              <input name="entry_min" type="number" min="1" max="50" step="1" value="5" />
+            </label>
+            <label>
+              Max
+              <input name="entry_max" type="number" min="1" max="50" step="1" value="15" />
+            </label>
+            <label>
+              Step
+              <input name="entry_step" type="number" min="1" max="25" step="1" value="5" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Exit Threshold (RSI)</span>
+            <label>
+              Min
+              <input name="exit_min" type="number" min="40" max="100" step="1" value="60" />
+            </label>
+            <label>
+              Max
+              <input name="exit_max" type="number" min="40" max="100" step="1" value="80" />
+            </label>
+            <label>
+              Step
+              <input name="exit_step" type="number" min="1" max="25" step="1" value="10" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Max Hold (days)</span>
+            <label>
+              Min
+              <input name="hold_min" type="number" min="0" max="60" step="1" value="3" data-hold-range />
+            </label>
+            <label>
+              Max
+              <input name="hold_max" type="number" min="0" max="60" step="1" value="10" data-hold-range />
+            </label>
+            <label>
+              Step
+              <input name="hold_step" type="number" min="1" max="30" step="1" value="2" data-hold-range />
+            </label>
+            <label class="form-checkbox">
+              <input id="hold_infinite" name="hold_infinite" type="checkbox" checked />
+              <span>Include infinite hold</span>
+            </label>
+            <label class="form-checkbox">
+              <input id="hold_only_infinite" name="hold_only_infinite" type="checkbox" />
+              <span>Use only infinite hold</span>
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Target Position (%)</span>
+            <label>
+              Min
+              <input name="target_min" type="number" min="1" max="100" step="1" value="10" />
+            </label>
+            <label>
+              Max
+              <input name="target_max" type="number" min="1" max="100" step="1" value="20" />
+            </label>
+            <label>
+              Step
+              <input name="target_step" type="number" min="1" max="50" step="1" value="5" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Stop Loss (%)</span>
+            <label class="form-checkbox">
+              <input id="use_stop_range" name="use_stop_range" type="checkbox" />
+              <span>Evaluate stop-loss range</span>
+            </label>
+            <label class="form-checkbox">
+              <input id="stop_single_value" name="stop_single_value" type="checkbox" data-stop-range />
+              <span>Use single stop-loss value</span>
+            </label>
+            <label>
+              Min
+              <input id="stop_min" name="stop_min" type="number" min="1" max="50" step="1" value="5" data-stop-range />
+            </label>
+            <label>
+              Max
+              <input id="stop_max" name="stop_max" type="number" min="1" max="50" step="1" value="10" data-stop-range />
+            </label>
+            <label>
+              Step
+              <input id="stop_step" name="stop_step" type="number" min="1" max="20" step="1" value="5" data-stop-range />
+            </label>
+            <label class="form-checkbox">
+              <input id="include_no_stop_loss" name="include_no_stop_loss" type="checkbox" checked data-stop-range />
+              <span>Include no stop-loss</span>
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Lot Size</span>
+            <label>
+              Shares per trade
+              <input name="lot_size" type="number" min="1" step="1" value="1" />
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <button id="run-button" type="submit">Optimize Strategy</button>
+    </form>
+
+    <div class="status" id="status"></div>
+  </aside>
+
+  <section class="metrics" id="metrics">
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Paper Testing Metrics</h3>
+        <span id="paper-window" class="metric-window"></span>
+      </div>
+      <div class="metric-grid" id="paper-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Training Metrics</h3>
+        <span id="training-window" class="metric-window"></span>
+      </div>
+      <div class="metric-grid" id="training-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Optimal Parameters</h3>
+      </div>
+      <div class="metric-grid" id="parameter-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Top Candidates</h3>
+      </div>
+      <div class="table-scroll">
+        <table id="ranking-table">
+          <thead>
+            <tr>
+              <th>Parameters</th>
+              <th>CAGR</th>
+              <th>Total Return</th>
+              <th>Final Equity</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="chart-container">
+    <div class="chart-header">
+      <h2 id="chart-title">Candlestick Chart</h2>
+      <select id="symbol-select" class="symbol-select"></select>
+    </div>
+    <div id="chart" class="chart"></div>
+  </section>
+
+  <section class="chart-container">
+    <div class="chart-header">
+      <h2>Equity Curve</h2>
+    </div>
+    <div id="equity-chart" class="chart"></div>
+  </section>
+</section>
+{% endblock %}

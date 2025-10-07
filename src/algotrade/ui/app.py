@@ -1,9 +1,11 @@
-"""FastAPI application exposing a candlestick UI for mean reversion backtests."""
+"""FastAPI application exposing a candlestick UI for strategy backtests."""
 
 from __future__ import annotations
 
 import os
+from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timedelta, timezone
+from enum import Enum
 from math import ceil
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -18,13 +20,24 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ..config import AppSettings
 from ..data.stores.local import ParquetBarStore
 from ..data.ingest import ingest_polygon_daily
-from ..experiments import OptimizationOutcome, optimize_mean_reversion_parameters
+from ..experiments import (
+    BreakoutParameterSpec,
+    FloatRange,
+    optimize_breakout_parameters,
+    optimize_mean_reversion_parameters,
+)
 from ..experiments.mean_reversion import HoldRange, OptimizationParameterSpec, ParameterRange
+from ..strategies import BreakoutPattern
 
 DEFAULT_STORE_PATH = Path(
     os.getenv("ALGO_TRADE_STORE_PATH", "data/raw/polygon/daily"))
 DEFAULT_BAR_SIZE = "1d"
 DEFAULT_SYMBOLS = ("AAPL", "MSFT")
+
+
+class StrategyName(str, Enum):
+    MEAN_REVERSION = "mean_reversion"
+    BREAKOUT = "breakout"
 
 
 class RangeRequest(BaseModel):
@@ -45,6 +58,26 @@ class RangeRequest(BaseModel):
 
     def to_range(self) -> ParameterRange:
         return ParameterRange(self.minimum, self.maximum, self.step)
+
+
+class FloatRangeRequest(BaseModel):
+    """Schema describing an inclusive floating point range."""
+
+    minimum: float = Field(..., description="Inclusive lower bound")
+    maximum: float = Field(..., description="Inclusive upper bound")
+    step: float = Field(..., gt=0, description="Step size between values")
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _check_bounds(self) -> "FloatRangeRequest":
+        if self.maximum < self.minimum:
+            raise ValueError(
+                "maximum must be greater than or equal to minimum")
+        return self
+
+    def to_range(self) -> FloatRange:
+        return FloatRange(self.minimum, self.maximum, self.step)
 
 
 class HoldRangeRequest(RangeRequest):
@@ -69,7 +102,7 @@ class HoldRangeRequest(RangeRequest):
         )
 
 
-class OptimizationParameterSpecRequest(BaseModel):
+class MeanReversionParameterSpecRequest(BaseModel):
     entry_threshold: RangeRequest
     exit_threshold: RangeRequest
     max_hold_days: HoldRangeRequest
@@ -92,20 +125,117 @@ class OptimizationParameterSpecRequest(BaseModel):
         )
 
 
+class BreakoutParameterSpecRequest(BaseModel):
+    patterns: List[str] = Field(
+        default_factory=lambda: [
+            BreakoutPattern.TWENTY_DAY_HIGH.value,
+            BreakoutPattern.DONCHIAN_CHANNEL.value,
+        ]
+    )
+    lookback_days: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=20, maximum=60, step=20)
+    )
+    breakout_buffer_pct: FloatRangeRequest = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=0.0, maximum=0.01, step=0.005)
+    )
+    volume_ratio_threshold: FloatRangeRequest = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=1.0, maximum=1.5, step=0.5)
+    )
+    volume_lookback_days: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=20, maximum=20, step=1)
+    )
+    max_hold_days: HoldRangeRequest = Field(
+        default_factory=lambda: HoldRangeRequest(
+            minimum=10,
+            maximum=20,
+            step=10,
+            include_infinite=True,
+            only_infinite=False,
+        )
+    )
+    target_position_pct: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=10, maximum=20, step=10)
+    )
+    stop_loss_pct: FloatRangeRequest | None = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=0.05, maximum=0.05, step=0.01)
+    )
+    trailing_stop_pct: FloatRangeRequest | None = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=0.08, maximum=0.08, step=0.01)
+    )
+    profit_target_pct: FloatRangeRequest | None = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=0.15, maximum=0.15, step=0.01)
+    )
+    include_no_stop_loss: bool = True
+    include_no_trailing_stop: bool = True
+    include_no_profit_target: bool = True
+    lot_size: int = Field(10, gt=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _validate_patterns(self) -> "BreakoutParameterSpecRequest":
+        if not self.patterns:
+            raise ValueError("At least one breakout pattern must be provided.")
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for pattern in self.patterns:
+            try:
+                value = BreakoutPattern(pattern).value
+            except ValueError as exc:  # pragma: no cover - request validation
+                raise ValueError(
+                    f"Unsupported breakout pattern '{pattern}'.") from exc
+            if value in seen:
+                continue
+            normalized.append(value)
+            seen.add(value)
+        self.patterns = normalized
+        return self
+
+    def to_spec(self) -> BreakoutParameterSpec:
+        return BreakoutParameterSpec(
+            patterns=[BreakoutPattern(value) for value in self.patterns],
+            lookback_days=self.lookback_days.to_range(),
+            breakout_buffer_pct=self.breakout_buffer_pct.to_range(),
+            volume_ratio_threshold=self.volume_ratio_threshold.to_range(),
+            volume_lookback_days=self.volume_lookback_days.to_range(),
+            max_hold_days=self.max_hold_days.to_hold_range(),
+            target_position_pct=self.target_position_pct.to_range(),
+            stop_loss_pct=self.stop_loss_pct.to_range() if self.stop_loss_pct else None,
+            trailing_stop_pct=self.trailing_stop_pct.to_range(
+            ) if self.trailing_stop_pct else None,
+            profit_target_pct=self.profit_target_pct.to_range(
+            ) if self.profit_target_pct else None,
+            include_no_stop_loss=self.include_no_stop_loss,
+            include_no_trailing_stop=self.include_no_trailing_stop,
+            include_no_profit_target=self.include_no_profit_target,
+            lot_size=self.lot_size,
+        )
+
+
 class OptimizationRequest(BaseModel):
     symbols: List[str] = Field(default_factory=list)
-    initial_cash: float = Field(100_000.0, gt=0)
+    initial_cash: float = Field(10_000.0, gt=0)
     limit: int = Field(250, ge=0)
     bar_size: str = Field(DEFAULT_BAR_SIZE, description="Historical bar size")
     store_path: str | None = Field(default=None)
-    paper_days: int = Field(365, ge=60)
+    paper_days: int = Field(360, ge=60)
     training_years: float = Field(2.0, gt=0)
     auto_fetch: bool = Field(
-        False, description="Download missing Polygon data on demand")
-    parameter_spec: OptimizationParameterSpecRequest | None = None
+        False, description="Download missing Polygon history on demand"
+    )
+    strategy: StrategyName = Field(default=StrategyName.MEAN_REVERSION)
+    mean_reversion_spec: MeanReversionParameterSpecRequest | None = Field(
+        default=None, alias="parameter_spec"
+    )
+    breakout_spec: BreakoutParameterSpecRequest | None = None
     include_warnings: bool = True
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     @model_validator(mode="after")
     def _normalize(self) -> "OptimizationRequest":
@@ -126,7 +256,20 @@ class OptimizationRequest(BaseModel):
             raise ValueError("Only 1d bar_size is currently supported.")
         self.bar_size = normalized_bar_size
 
+        if not isinstance(self.strategy, StrategyName):
+            self.strategy = StrategyName(self.strategy)
+
         return self
+
+    def resolve_mean_reversion_spec(self) -> OptimizationParameterSpec | None:
+        if self.mean_reversion_spec is None:
+            return None
+        return self.mean_reversion_spec.to_spec()
+
+    def resolve_breakout_spec(self) -> BreakoutParameterSpec | None:
+        if self.breakout_spec is None:
+            return None
+        return self.breakout_spec.to_spec()
 
 
 def create_app(templates_dir: Path | None = None, static_dir: Path | None = None) -> FastAPI:
@@ -136,7 +279,7 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
     templates_path = templates_dir or (root / "templates")
     static_path = static_dir or (root / "static")
 
-    app = FastAPI(title="Mean Reversion Strategy Viewer", version="0.1.0")
+    app = FastAPI(title="Strategy Optimization Viewer", version="0.2.0")
     templates = Jinja2Templates(directory=str(templates_path))
 
     if static_path.exists():
@@ -146,6 +289,22 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
     @app.get("/", response_class=HTMLResponse)
     async def render_index(request: Request) -> HTMLResponse:
         return templates.TemplateResponse("index.html", {"request": request})
+
+    @app.get("/mean-reversion", response_class=HTMLResponse)
+    async def render_mean_reversion(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse("mean_reversion.html", {"request": request})
+
+    @app.get("/breakout", response_class=HTMLResponse)
+    async def render_breakout(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse("breakout.html", {"request": request})
+
+    @app.get("/vcp", response_class=HTMLResponse)
+    async def render_vcp(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse("vcp.html", {"request": request})
+
+    @app.get("/momentum", response_class=HTMLResponse)
+    async def render_momentum(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse("momentum.html", {"request": request})
 
     @app.get("/api/symbols", response_class=JSONResponse)
     async def list_symbols(
@@ -210,9 +369,14 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
                 },
             )
 
-        parameter_spec = (
-            request_body.parameter_spec.to_spec()
-            if request_body.parameter_spec
+        mean_reversion_spec = (
+            request_body.resolve_mean_reversion_spec()
+            if request_body.strategy == StrategyName.MEAN_REVERSION
+            else None
+        )
+        breakout_spec = (
+            request_body.resolve_breakout_spec()
+            if request_body.strategy == StrategyName.BREAKOUT
             else None
         )
 
@@ -231,15 +395,26 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
                 continue
 
             try:
-                optimization = optimize_mean_reversion_parameters(
-                    store_path=store_root,
-                    universe=[symbol],
-                    initial_cash=request_body.initial_cash,
-                    training_window=training_window,
-                    paper_window=paper_window,
-                    bar_size=request_body.bar_size,
-                    parameter_spec=parameter_spec,
-                )
+                if request_body.strategy == StrategyName.MEAN_REVERSION:
+                    optimization = optimize_mean_reversion_parameters(
+                        store_path=store_root,
+                        universe=[symbol],
+                        initial_cash=request_body.initial_cash,
+                        training_window=training_window,
+                        paper_window=paper_window,
+                        bar_size=request_body.bar_size,
+                        parameter_spec=mean_reversion_spec,
+                    )
+                else:
+                    optimization = optimize_breakout_parameters(
+                        store_path=store_root,
+                        universe=[symbol],
+                        initial_cash=request_body.initial_cash,
+                        training_window=training_window,
+                        paper_window=paper_window,
+                        bar_size=request_body.bar_size,
+                        parameter_spec=breakout_spec,
+                    )
             except ValueError as exc:
                 symbol_warnings.append({"symbol": symbol, "reason": str(exc)})
                 continue
@@ -259,6 +434,7 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
                 "equity_curve": equity_curve,
                 "metrics": metrics,
                 "optimization": _serialize_optimization_summary(optimization),
+                "strategy": request_body.strategy.value,
             }
 
         if not results:
@@ -274,6 +450,7 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
             "requested_symbols": request_body.symbols,
             "symbols": list(results.keys()),
             "results": results,
+            "strategy": request_body.strategy.value,
         }
 
         aggregated_warnings = missing_sources + symbol_warnings
@@ -402,7 +579,7 @@ def _infer_end_date(frames: Iterable[pd.DataFrame]) -> date:
 def _determine_optimization_windows(
     frames: Iterable[pd.DataFrame],
     *,
-    paper_days: int = 365,
+    paper_days: int = 360,
     training_years: float = 2,
 ) -> tuple[tuple[date, date], tuple[date, date]]:
     earliest = _infer_start_date(frames)
@@ -484,37 +661,15 @@ def _normalize_metrics(metrics: Dict[str, Any]) -> Dict[str, float]:
     return normalized
 
 
-def _serialize_optimization_summary(outcome: OptimizationOutcome) -> Dict[str, Any]:
-    best = outcome.best_parameters
-    rankings = (
-        outcome.parameter_frame.sort_values(
-            ["cagr", "final_equity"], ascending=[False, False])
-        .head(10)
-        .to_dict(orient="records")
-    )
-    for row in rankings:
-        for key, value in list(row.items()):
-            if key in {"split", "params"}:
-                continue
-            if isinstance(value, (int, float)):
-                row[key] = float(value)
-            else:
-                try:
-                    row[key] = float(value)
-                except (TypeError, ValueError):  # pragma: no cover - defensive
-                    row[key] = None
-
-    best_parameters = {
-        "entry_threshold": best.entry_threshold,
-        "exit_threshold": best.exit_threshold,
-        "max_hold_days": best.max_hold_days,
-        "target_position_pct": best.target_position_pct,
-        "stop_loss_pct": best.stop_loss_pct,
-        "lot_size": best.lot_size,
-    }
+def _serialize_optimization_summary(outcome: Any) -> Dict[str, Any]:
+    rankings_frame = outcome.parameter_frame.sort_values(
+        ["cagr", "final_equity"], ascending=[False, False]
+    ).head(10)
+    rankings = [_normalize_row(record)
+                for record in rankings_frame.to_dict(orient="records")]
 
     return {
-        "best_parameters": best_parameters,
+        "best_parameters": _serialize_parameters(outcome.best_parameters),
         "training": {
             "start": outcome.training_window[0].isoformat(),
             "end": outcome.training_window[1].isoformat(),
@@ -527,6 +682,50 @@ def _serialize_optimization_summary(outcome: OptimizationOutcome) -> Dict[str, A
         },
         "rankings": rankings,
     }
+
+
+def _serialize_parameters(params: Any) -> Dict[str, Any]:
+    if is_dataclass(params):
+        data = asdict(params)
+    elif isinstance(params, dict):
+        data = dict(params)
+    else:
+        data = {
+            key: getattr(params, key)
+            for key in dir(params)
+            if not key.startswith("_") and not callable(getattr(params, key))
+        }
+
+    serialized: Dict[str, Any] = {}
+    for key, value in data.items():
+        serialized[key] = _normalize_parameter_value(value)
+    return serialized
+
+
+def _normalize_parameter_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, float):
+        return float(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, (list, tuple)):
+        return [_normalize_parameter_value(item) for item in value]
+    return value
+
+
+def _normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+    for key, value in row.items():
+        if isinstance(value, (int, float)):
+            normalized[key] = float(value)
+        elif isinstance(value, Enum):
+            normalized[key] = value.value
+        else:
+            normalized[key] = value
+    return normalized
 
 
 def _to_iso(value: Any) -> str:

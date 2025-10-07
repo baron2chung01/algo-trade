@@ -1,0 +1,304 @@
+{% extends "base.html" %} {% block title %}Breakout Dashboard{% endblock %} {% block page_id %}breakout{% endblock %} {% block head_scripts %}
+<script src="https://cdn.plot.ly/plotly-2.30.0.min.js" defer></script>
+{% endblock %} {% block footer_scripts %}
+<script src="/static/app.js" type="module" defer></script>
+{% endblock %} {% block content %}
+<section class="layout">
+  <aside class="control-panel">
+    <form id="control-form" class="control-form">
+      <input type="hidden" id="strategy" name="strategy" value="breakout" />
+
+      <div class="form-section">
+        <h2 class="form-section-title">Universe</h2>
+        <label>
+          Cached symbols
+          <select id="available-symbols" multiple size="8"></select>
+        </label>
+        <label>
+          Extra symbols
+          <input id="extra-symbols" name="extra_symbols" type="text" placeholder="e.g. NVDA, META" />
+        </label>
+      </div>
+
+      <div class="form-section">
+        <h2 class="form-section-title">Simulation Settings</h2>
+        <div class="form-grid">
+          <label>
+            Initial cash ($)
+            <input name="initial_cash" type="number" min="1000" step="500" value="10000" />
+          </label>
+          <label>
+            Bar limit
+            <input name="limit" type="number" min="0" step="10" value="250" />
+          </label>
+          <label>
+            Paper window (days)
+            <input name="paper_days" type="number" min="60" step="30" value="360" />
+          </label>
+          <label>
+            Training window (years)
+            <input name="training_years" type="number" min="1" step="0.5" value="2" />
+          </label>
+        </div>
+        <label class="form-checkbox">
+          <input id="auto-fetch" name="auto_fetch" type="checkbox" />
+          <span>Download missing Polygon data automatically</span>
+        </label>
+      </div>
+
+      <div class="form-section form-section--params" id="breakout-params">
+        <h2 class="form-section-title">Breakout Parameters</h2>
+        <div class="range-grid">
+          <div class="range-group">
+            <span class="range-title">Patterns</span>
+            <label>
+              Select patterns
+              <select id="breakout_patterns" name="breakout_patterns" multiple size="5">
+                <option value="twenty_day_high" selected>20-Day High Breakout</option>
+                <option value="donchian_channel" selected>Donchian Channel Breakout</option>
+                <option value="fifty_two_week_high" selected>52-Week High Breakout</option>
+                <option value="volume_spike_high">Volume Spike Breakout</option>
+                <option value="volatility_contraction">Volatility Contraction Pattern</option>
+              </select>
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Entry Lookback (days)</span>
+            <label>
+              Min
+              <input name="breakout_lookback_min" type="number" min="10" max="120" step="5" value="20" />
+            </label>
+            <label>
+              Max
+              <input name="breakout_lookback_max" type="number" min="10" max="120" step="5" value="60" />
+            </label>
+            <label>
+              Step
+              <input name="breakout_lookback_step" type="number" min="5" max="60" step="5" value="20" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Breakout Buffer (%)</span>
+            <label>
+              Min
+              <input name="breakout_buffer_min" type="number" min="0" step="0.1" value="0" />
+            </label>
+            <label>
+              Max
+              <input name="breakout_buffer_max" type="number" min="0" step="0.1" value="1" />
+            </label>
+            <label>
+              Step
+              <input name="breakout_buffer_step" type="number" min="0.1" step="0.1" value="0.5" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Volume Ratio</span>
+            <label>
+              Min
+              <input name="breakout_volume_ratio_min" type="number" min="1" step="0.1" value="1" />
+            </label>
+            <label>
+              Max
+              <input name="breakout_volume_ratio_max" type="number" min="1" step="0.1" value="1.5" />
+            </label>
+            <label>
+              Step
+              <input name="breakout_volume_ratio_step" type="number" min="0.1" step="0.1" value="0.5" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Volume Lookback (days)</span>
+            <label>
+              Min
+              <input name="breakout_volume_lookback_min" type="number" min="5" step="1" value="20" />
+            </label>
+            <label>
+              Max
+              <input name="breakout_volume_lookback_max" type="number" min="5" step="1" value="20" />
+            </label>
+            <label>
+              Step
+              <input name="breakout_volume_lookback_step" type="number" min="1" step="1" value="1" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Max Hold (days)</span>
+            <label>
+              Min
+              <input name="breakout_hold_min" type="number" min="0" max="120" step="1" value="10" data-breakout-hold-range />
+            </label>
+            <label>
+              Max
+              <input name="breakout_hold_max" type="number" min="0" max="120" step="1" value="20" data-breakout-hold-range />
+            </label>
+            <label>
+              Step
+              <input name="breakout_hold_step" type="number" min="1" max="60" step="1" value="10" data-breakout-hold-range />
+            </label>
+            <label class="form-checkbox">
+              <input id="breakout_hold_infinite" name="breakout_hold_infinite" type="checkbox" checked />
+              <span>Include infinite hold</span>
+            </label>
+            <label class="form-checkbox">
+              <input id="breakout_hold_only_infinite" name="breakout_hold_only_infinite" type="checkbox" />
+              <span>Use only infinite hold</span>
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Target Position (%)</span>
+            <label>
+              Min
+              <input name="breakout_target_min" type="number" min="1" max="100" step="1" value="10" />
+            </label>
+            <label>
+              Max
+              <input name="breakout_target_max" type="number" min="1" max="100" step="1" value="20" />
+            </label>
+            <label>
+              Step
+              <input name="breakout_target_step" type="number" min="1" max="100" step="1" value="10" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Stop Loss (%)</span>
+            <label class="form-checkbox">
+              <input id="breakout_use_stop_range" name="breakout_use_stop_range" type="checkbox" checked />
+              <span>Enable stop-loss evaluation</span>
+            </label>
+            <label>
+              Min
+              <input name="breakout_stop_min" type="number" min="1" max="50" step="0.5" value="5" data-breakout-stop-range />
+            </label>
+            <label>
+              Max
+              <input name="breakout_stop_max" type="number" min="1" max="50" step="0.5" value="5" data-breakout-stop-range />
+            </label>
+            <label>
+              Step
+              <input name="breakout_stop_step" type="number" min="0.5" max="20" step="0.5" value="1" data-breakout-stop-range />
+            </label>
+            <label class="form-checkbox">
+              <input id="breakout_include_no_stop_loss" name="breakout_include_no_stop_loss" type="checkbox" checked />
+              <span>Include no stop-loss</span>
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Trailing Stop (%)</span>
+            <label class="form-checkbox">
+              <input id="breakout_use_trailing_range" name="breakout_use_trailing_range" type="checkbox" checked />
+              <span>Enable trailing-stop evaluation</span>
+            </label>
+            <label>
+              Min
+              <input name="breakout_trailing_min" type="number" min="1" max="50" step="0.5" value="8" data-breakout-trailing-range />
+            </label>
+            <label>
+              Max
+              <input name="breakout_trailing_max" type="number" min="1" max="50" step="0.5" value="8" data-breakout-trailing-range />
+            </label>
+            <label>
+              Step
+              <input name="breakout_trailing_step" type="number" min="0.5" max="20" step="0.5" value="1" data-breakout-trailing-range />
+            </label>
+            <label class="form-checkbox">
+              <input id="breakout_include_no_trailing_stop" name="breakout_include_no_trailing_stop" type="checkbox" checked />
+              <span>Include no trailing-stop option</span>
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Profit Target (%)</span>
+            <label class="form-checkbox">
+              <input id="breakout_use_profit_range" name="breakout_use_profit_range" type="checkbox" checked />
+              <span>Enable profit-target evaluation</span>
+            </label>
+            <label>
+              Min
+              <input name="breakout_profit_min" type="number" min="1" max="100" step="0.5" value="15" data-breakout-profit-range />
+            </label>
+            <label>
+              Max
+              <input name="breakout_profit_max" type="number" min="1" max="100" step="0.5" value="15" data-breakout-profit-range />
+            </label>
+            <label>
+              Step
+              <input name="breakout_profit_step" type="number" min="0.5" max="20" step="0.5" value="1" data-breakout-profit-range />
+            </label>
+            <label class="form-checkbox">
+              <input id="breakout_include_no_profit_target" name="breakout_include_no_profit_target" type="checkbox" checked />
+              <span>Include no profit-target option</span>
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Lot Size</span>
+            <label>
+              Shares per trade
+              <input id="breakout_lot_size" name="breakout_lot_size" type="number" min="1" step="1" value="1" />
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <button id="run-button" type="submit">Optimize Strategy</button>
+    </form>
+
+    <div class="status" id="status"></div>
+  </aside>
+
+  <section class="metrics" id="metrics">
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Paper Testing Metrics</h3>
+        <span id="paper-window" class="metric-window"></span>
+      </div>
+      <div class="metric-grid" id="paper-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Training Metrics</h3>
+        <span id="training-window" class="metric-window"></span>
+      </div>
+      <div class="metric-grid" id="training-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Optimal Parameters</h3>
+      </div>
+      <div class="metric-grid" id="parameter-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Top Candidates</h3>
+      </div>
+      <div class="table-scroll">
+        <table id="ranking-table">
+          <thead>
+            <tr>
+              <th>Parameters</th>
+              <th>CAGR</th>
+              <th>Total Return</th>
+              <th>Final Equity</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="chart-container">
+    <div class="chart-header">
+      <h2 id="chart-title">Candlestick Chart</h2>
+      <select id="symbol-select" class="symbol-select"></select>
+    </div>
+    <div id="chart" class="chart"></div>
+  </section>
+
+  <section class="chart-container">
+    <div class="chart-header">
+      <h2>Equity Curve</h2>
+    </div>
+    <div id="equity-chart" class="chart"></div>
+  </section>
+</section>
+{% endblock %}

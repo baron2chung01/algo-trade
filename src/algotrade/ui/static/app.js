@@ -1,93 +1,182 @@
 const DEFAULT_SYMBOLS = ["AAPL", "MSFT"];
+const STRATEGY_MEAN_REVERSION = "mean_reversion";
+const STRATEGY_BREAKOUT = "breakout";
 
-const form = document.getElementById("control-form");
-const statusEl = document.getElementById("status");
-const paperMetricsEl = document.getElementById("paper-metrics");
-const trainingMetricsEl = document.getElementById("training-metrics");
-const parameterMetricsEl = document.getElementById("parameter-metrics");
-const rankingTableBody = document.querySelector("#ranking-table tbody");
-const paperWindowEl = document.getElementById("paper-window");
-const trainingWindowEl = document.getElementById("training-window");
-const chartEl = document.getElementById("chart");
-const equityEl = document.getElementById("equity-chart");
-const symbolSelect = document.getElementById("symbol-select");
-const runButton = document.getElementById("run-button");
-const chartTitle = document.getElementById("chart-title");
-const availableSymbolsSelect = document.getElementById("available-symbols");
-const extraSymbolsInput = document.getElementById("extra-symbols");
-const stopRangeToggle = document.getElementById("use_stop_range");
-const stopRangeInputs = document.querySelectorAll("[data-stop-range]");
-const stopSingleValueToggle = document.getElementById("stop_single_value");
-const stopMinInput = document.getElementById("stop_min");
-const stopMaxInput = document.getElementById("stop_max");
-const stopStepInput = document.getElementById("stop_step");
-const holdInfiniteToggle = document.getElementById("hold_infinite");
-const holdOnlyInfiniteToggle = document.getElementById("hold_only_infinite");
-const holdRangeInputs = document.querySelectorAll("[data-hold-range]");
+const pageId = document.body?.dataset?.page || "";
+
+const elements = {
+    form: document.getElementById("control-form"),
+    status: document.getElementById("status"),
+    paperMetrics: document.getElementById("paper-metrics"),
+    trainingMetrics: document.getElementById("training-metrics"),
+    parameterMetrics: document.getElementById("parameter-metrics"),
+    rankingTableBody: document.querySelector("#ranking-table tbody"),
+    paperWindow: document.getElementById("paper-window"),
+    trainingWindow: document.getElementById("training-window"),
+    chart: document.getElementById("chart"),
+    equityChart: document.getElementById("equity-chart"),
+    symbolSelect: document.getElementById("symbol-select"),
+    runButton: document.getElementById("run-button"),
+    chartTitle: document.getElementById("chart-title"),
+    availableSymbolsSelect: document.getElementById("available-symbols"),
+    extraSymbolsInput: document.getElementById("extra-symbols"),
+    strategySelect: document.getElementById("strategy"),
+    meanReversionSection: document.getElementById("mean-reversion-params"),
+    breakoutSection: document.getElementById("breakout-params"),
+};
+
+const meanReversionControls = {
+    stopRangeToggle: document.getElementById("use_stop_range"),
+    stopRangeInputs: document.querySelectorAll("[data-stop-range]"),
+    stopSingleValueToggle: document.getElementById("stop_single_value"),
+    stopMinInput: document.getElementById("stop_min"),
+    stopMaxInput: document.getElementById("stop_max"),
+    stopStepInput: document.getElementById("stop_step"),
+    holdInfiniteToggle: document.getElementById("hold_infinite"),
+    holdOnlyInfiniteToggle: document.getElementById("hold_only_infinite"),
+    holdRangeInputs: document.querySelectorAll("[data-hold-range]"),
+};
+
+const breakoutControls = {
+    stopToggle: document.getElementById("breakout_use_stop_range"),
+    stopInputs: document.querySelectorAll("[data-breakout-stop-range]"),
+    trailingToggle: document.getElementById("breakout_use_trailing_range"),
+    trailingInputs: document.querySelectorAll("[data-breakout-trailing-range]"),
+    profitToggle: document.getElementById("breakout_use_profit_range"),
+    profitInputs: document.querySelectorAll("[data-breakout-profit-range]"),
+    holdInfiniteToggle: document.getElementById("breakout_hold_infinite"),
+    holdOnlyInfiniteToggle: document.getElementById("breakout_hold_only_infinite"),
+    holdRangeInputs: document.querySelectorAll("[data-breakout-hold-range]"),
+};
 
 let latestData = null;
 
-function handleStopRangeToggle() {
-    if (!stopRangeInputs) {
+function initialize() {
+    if (!elements.form) {
         return;
     }
-    const rangeEnabled = !!(stopRangeToggle && stopRangeToggle.checked);
-    stopRangeInputs.forEach((input) => {
+    setupMeanReversionControls();
+    setupBreakoutControls();
+    toggleParameterSections();
+
+    elements.form.addEventListener("submit", runBacktest);
+    if (elements.symbolSelect) {
+        elements.symbolSelect.addEventListener("change", renderSymbolData);
+    }
+    if (elements.strategySelect && elements.strategySelect.tagName === "SELECT") {
+        elements.strategySelect.addEventListener("change", () => {
+            toggleParameterSections();
+        });
+    }
+
+    loadAvailableSymbols().then(runBacktest);
+}
+
+function setupMeanReversionControls() {
+    const controls = meanReversionControls;
+    if (controls.stopRangeToggle) {
+        controls.stopRangeToggle.addEventListener("change", () => {
+            applyStopRangeState(controls);
+        });
+    }
+    if (controls.stopSingleValueToggle) {
+        controls.stopSingleValueToggle.addEventListener("change", () => {
+            applyStopRangeState(controls);
+        });
+    }
+    if (controls.holdOnlyInfiniteToggle) {
+        controls.holdOnlyInfiniteToggle.addEventListener("change", () => {
+            applyHoldState(controls.holdOnlyInfiniteToggle, controls.holdInfiniteToggle, controls.holdRangeInputs);
+        });
+    }
+
+    applyStopRangeState(controls);
+    applyHoldState(controls.holdOnlyInfiniteToggle, controls.holdInfiniteToggle, controls.holdRangeInputs);
+}
+
+function setupBreakoutControls() {
+    const controls = breakoutControls;
+    createRangeToggle(controls.stopToggle, controls.stopInputs);
+    createRangeToggle(controls.trailingToggle, controls.trailingInputs);
+    createRangeToggle(controls.profitToggle, controls.profitInputs);
+    applyHoldState(controls.holdOnlyInfiniteToggle, controls.holdInfiniteToggle, controls.holdRangeInputs);
+    if (controls.holdOnlyInfiniteToggle) {
+        controls.holdOnlyInfiniteToggle.addEventListener("change", () => {
+            applyHoldState(controls.holdOnlyInfiniteToggle, controls.holdInfiniteToggle, controls.holdRangeInputs);
+        });
+    }
+}
+
+function applyStopRangeState(controls) {
+    if (!controls.stopRangeToggle || !controls.stopRangeInputs) {
+        return;
+    }
+    const rangeEnabled = controls.stopRangeToggle.checked;
+    controls.stopRangeInputs.forEach((input) => {
         input.disabled = !rangeEnabled;
     });
-    applyStopSingleState();
+    if (controls.stopSingleValueToggle) {
+        const singleMode = rangeEnabled && controls.stopSingleValueToggle.checked;
+        if (singleMode && controls.stopMinInput && controls.stopMaxInput) {
+            controls.stopMaxInput.value = controls.stopMinInput.value;
+        }
+        if (controls.stopStepInput) {
+            controls.stopStepInput.disabled = !rangeEnabled || singleMode;
+            if (singleMode) {
+                controls.stopStepInput.value = "1";
+            }
+        }
+        if (controls.stopMaxInput) {
+            controls.stopMaxInput.disabled = !rangeEnabled || singleMode;
+        }
+    }
 }
 
-if (stopRangeToggle) {
-    stopRangeToggle.addEventListener("change", handleStopRangeToggle);
-}
-
-function applyStopSingleState() {
-    if (!stopMaxInput && !stopStepInput) {
+function createRangeToggle(toggle, inputs) {
+    if (!toggle || !inputs) {
         return;
     }
-    const rangeEnabled = !!(stopRangeToggle && stopRangeToggle.checked);
-    const singleMode = rangeEnabled && !!(stopSingleValueToggle && stopSingleValueToggle.checked);
-    if (singleMode && stopMinInput && stopMaxInput) {
-        stopMaxInput.value = stopMinInput.value;
-    }
-    if (singleMode && stopStepInput) {
-        stopStepInput.value = "1";
-    }
-    if (stopMaxInput) {
-        stopMaxInput.disabled = !rangeEnabled || singleMode;
-    }
-    if (stopStepInput) {
-        stopStepInput.disabled = !rangeEnabled || singleMode;
-    }
+    const applyState = () => {
+        const enabled = toggle.checked;
+        inputs.forEach((input) => {
+            input.disabled = !enabled;
+        });
+    };
+    toggle.addEventListener("change", applyState);
+    applyState();
 }
 
-if (stopSingleValueToggle) {
-    stopSingleValueToggle.addEventListener("change", applyStopSingleState);
-}
-
-function handleHoldOnlyInfiniteToggle() {
-    if (!holdRangeInputs) {
+function applyHoldState(onlyToggle, includeToggle, inputs) {
+    if (!onlyToggle || !inputs) {
         return;
     }
-    const onlyInfinite = !!(holdOnlyInfiniteToggle && holdOnlyInfiniteToggle.checked);
-    holdRangeInputs.forEach((input) => {
+    const onlyInfinite = onlyToggle.checked;
+    inputs.forEach((input) => {
         input.disabled = onlyInfinite;
     });
-    if (onlyInfinite && holdInfiniteToggle) {
-        holdInfiniteToggle.checked = true;
+    if (onlyInfinite && includeToggle) {
+        includeToggle.checked = true;
     }
 }
 
-if (holdOnlyInfiniteToggle) {
-    holdOnlyInfiniteToggle.addEventListener("change", handleHoldOnlyInfiniteToggle);
+function toggleParameterSections() {
+    const strategy = getSelectedStrategy();
+    if (elements.meanReversionSection) {
+        elements.meanReversionSection.style.display = strategy === STRATEGY_MEAN_REVERSION ? "" : "none";
+    }
+    if (elements.breakoutSection) {
+        elements.breakoutSection.style.display = strategy === STRATEGY_BREAKOUT ? "" : "none";
+    }
+    if (elements.strategySelect && elements.strategySelect.tagName !== "SELECT") {
+        elements.strategySelect.value = strategy;
+    }
 }
 
 async function loadAvailableSymbols() {
-    if (!availableSymbolsSelect) {
+    if (!elements.availableSymbolsSelect) {
         return;
     }
-    availableSymbolsSelect.innerHTML = "";
+    elements.availableSymbolsSelect.innerHTML = "";
     let symbols = DEFAULT_SYMBOLS;
     try {
         const response = await fetch("/api/symbols");
@@ -108,13 +197,13 @@ async function loadAvailableSymbols() {
         if (DEFAULT_SYMBOLS.includes(symbol)) {
             option.selected = true;
         }
-        availableSymbolsSelect.append(option);
+        elements.availableSymbolsSelect.append(option);
     });
 }
 
 function gatherSymbols(formData) {
-    const selected = availableSymbolsSelect
-        ? Array.from(availableSymbolsSelect.selectedOptions).map((option) => option.value.toUpperCase())
+    const selected = elements.availableSymbolsSelect
+        ? Array.from(elements.availableSymbolsSelect.selectedOptions).map((option) => option.value.toUpperCase())
         : [];
     const manual = (formData.get("extra_symbols") || "")
         .split(",")
@@ -135,7 +224,82 @@ function parseFloatOr(value, fallback) {
     return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function buildParameterSpec(formData) {
+async function runBacktest(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    const formData = new FormData(elements.form);
+    const symbols = gatherSymbols(formData);
+    if (!symbols.length) {
+        setStatus("Please select at least one symbol to optimize.", "error");
+        return;
+    }
+
+    const strategy = getSelectedStrategy();
+
+    const payload = {
+        strategy,
+        symbols,
+        initial_cash: parseFloatOr(formData.get("initial_cash"), 10000),
+        limit: parseIntOr(formData.get("limit"), 250),
+        auto_fetch: formData.has("auto_fetch"),
+        paper_days: parseIntOr(formData.get("paper_days"), 360),
+        training_years: parseFloatOr(formData.get("training_years"), 2),
+    };
+
+    if (strategy === STRATEGY_MEAN_REVERSION) {
+        payload.parameter_spec = buildMeanReversionSpec(formData);
+    } else {
+        payload.breakout_spec = buildBreakoutSpec(formData);
+    }
+
+    setStatus("Searching for optimal parameters...", "info");
+    disableRunButton(true);
+    try {
+        const response = await fetch("/api/optimize", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+            let errorMessage = `Request failed with status ${response.status}`;
+            try {
+                const detail = await response.json();
+                if (typeof detail?.detail === "string") {
+                    errorMessage = detail.detail;
+                } else if (detail?.detail?.message) {
+                    errorMessage = detail.detail.message;
+                }
+            } catch (parseError) {
+                const fallback = await response.text();
+                if (fallback) {
+                    errorMessage = fallback;
+                }
+            }
+            throw new Error(errorMessage);
+        }
+
+        const data = await response.json();
+        latestData = data;
+        updateChartSymbolOptions(data.symbols || []);
+        renderSymbolData();
+    } catch (error) {
+        console.error(error);
+        setStatus(error.message || "Failed to run optimization.", "error");
+    } finally {
+        disableRunButton(false);
+    }
+}
+
+function disableRunButton(disabled) {
+    if (elements.runButton) {
+        elements.runButton.disabled = disabled;
+    }
+}
+
+function buildMeanReversionSpec(formData) {
     const toInt = (name, fallback) => parseIntOr(formData.get(name), fallback);
     const holdOnlyInfinite = formData.has("hold_only_infinite");
 
@@ -171,7 +335,7 @@ function buildParameterSpec(formData) {
         },
         stop_loss_pct: null,
         include_no_stop_loss: formData.has("include_no_stop_loss"),
-        lot_size: toInt("lot_size", 10),
+        lot_size: toInt("lot_size", 1),
     };
 
     if (formData.has("use_stop_range")) {
@@ -189,82 +353,107 @@ function buildParameterSpec(formData) {
     return spec;
 }
 
-async function runBacktest(event) {
-    if (event) {
-        event.preventDefault();
-    }
+function buildBreakoutSpec(formData) {
+    const toInt = (name, fallback) => parseIntOr(formData.get(name), fallback);
+    const toFloat = (name, fallback) => parseFloatOr(formData.get(name), fallback);
+    const toPercent = (name, fallback) => parseFloatOr(formData.get(name), fallback) / 100;
 
-    const formData = new FormData(form);
-    const symbols = gatherSymbols(formData);
+    const patternsSelect = document.getElementById("breakout_patterns");
+    const patterns = patternsSelect
+        ? Array.from(patternsSelect.selectedOptions).map((option) => option.value)
+        : ["twenty_day_high"];
 
-    if (!symbols.length) {
-        setStatus("Please select at least one symbol to optimize.", "error");
-        return;
-    }
-
-    const payload = {
-        symbols,
-        initial_cash: parseFloatOr(formData.get("initial_cash"), 100000),
-        limit: parseIntOr(formData.get("limit"), 250),
-        auto_fetch: formData.has("auto_fetch"),
-        paper_days: parseIntOr(formData.get("paper_days"), 365),
-        training_years: parseFloatOr(formData.get("training_years"), 2),
-        parameter_spec: buildParameterSpec(formData),
+    const spec = {
+        patterns: patterns.length ? patterns : ["twenty_day_high"],
+        lookback_days: {
+            minimum: toInt("breakout_lookback_min", 20),
+            maximum: toInt("breakout_lookback_max", 60),
+            step: toInt("breakout_lookback_step", 20),
+        },
+        breakout_buffer_pct: {
+            minimum: toPercent("breakout_buffer_min", 0),
+            maximum: toPercent("breakout_buffer_max", 1),
+            step: toPercent("breakout_buffer_step", 0.5),
+        },
+        volume_ratio_threshold: {
+            minimum: toFloat("breakout_volume_ratio_min", 1),
+            maximum: toFloat("breakout_volume_ratio_max", 1.5),
+            step: toFloat("breakout_volume_ratio_step", 0.5),
+        },
+        volume_lookback_days: {
+            minimum: toInt("breakout_volume_lookback_min", 20),
+            maximum: toInt("breakout_volume_lookback_max", 20),
+            step: toInt("breakout_volume_lookback_step", 1),
+        },
+        max_hold_days: formData.has("breakout_hold_only_infinite")
+            ? {
+                minimum: 0,
+                maximum: 0,
+                step: 1,
+                include_infinite: true,
+                only_infinite: true,
+            }
+            : {
+                minimum: toInt("breakout_hold_min", 10),
+                maximum: toInt("breakout_hold_max", 20),
+                step: toInt("breakout_hold_step", 10),
+                include_infinite: formData.has("breakout_hold_infinite"),
+            },
+        target_position_pct: {
+            minimum: toInt("breakout_target_min", 10),
+            maximum: toInt("breakout_target_max", 20),
+            step: toInt("breakout_target_step", 10),
+        },
+        stop_loss_pct: null,
+        trailing_stop_pct: null,
+        profit_target_pct: null,
+        include_no_stop_loss: formData.has("breakout_include_no_stop_loss"),
+        include_no_trailing_stop: formData.has("breakout_include_no_trailing_stop"),
+        include_no_profit_target: formData.has("breakout_include_no_profit_target"),
+        lot_size: toInt("breakout_lot_size", 1),
     };
 
-    setStatus("Searching for optimal parameters...", "info");
-    runButton.disabled = true;
-    try {
-        const response = await fetch("/api/optimize", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-        });
-
-        if (!response.ok) {
-            let errorMessage = `Request failed with status ${response.status}`;
-            try {
-                const detail = await response.json();
-                if (typeof detail?.detail === "string") {
-                    errorMessage = detail.detail;
-                } else if (detail?.detail?.message) {
-                    errorMessage = detail.detail.message;
-                }
-            } catch (parseError) {
-                const fallback = await response.text();
-                if (fallback) {
-                    errorMessage = fallback;
-                }
-            }
-            throw new Error(errorMessage);
-        }
-
-        const data = await response.json();
-        latestData = data;
-        updateChartSymbolOptions(data.symbols || []);
-        renderSymbolData();
-    } catch (error) {
-        console.error(error);
-        setStatus(error.message || "Failed to run optimization.", "error");
-    } finally {
-        runButton.disabled = false;
+    if (formData.has("breakout_use_stop_range")) {
+        spec.stop_loss_pct = {
+            minimum: toPercent("breakout_stop_min", 5),
+            maximum: toPercent("breakout_stop_max", 5),
+            step: toPercent("breakout_stop_step", 1),
+        };
     }
+
+    if (formData.has("breakout_use_trailing_range")) {
+        spec.trailing_stop_pct = {
+            minimum: toPercent("breakout_trailing_min", 8),
+            maximum: toPercent("breakout_trailing_max", 8),
+            step: toPercent("breakout_trailing_step", 1),
+        };
+    }
+
+    if (formData.has("breakout_use_profit_range")) {
+        spec.profit_target_pct = {
+            minimum: toPercent("breakout_profit_min", 15),
+            maximum: toPercent("breakout_profit_max", 15),
+            step: toPercent("breakout_profit_step", 1),
+        };
+    }
+
+    return spec;
 }
 
 function updateChartSymbolOptions(symbols) {
-    symbolSelect.innerHTML = "";
+    elements.symbolSelect.innerHTML = "";
     symbols.forEach((symbol) => {
         const option = document.createElement("option");
         option.value = symbol;
         option.textContent = symbol;
-        symbolSelect.append(option);
+        elements.symbolSelect.append(option);
     });
     if (symbols.length) {
-        const active = symbols.includes(symbolSelect.value) ? symbolSelect.value : symbols[0];
-        symbolSelect.value = active;
-        chartTitle.textContent = `${active} Candlestick`;
+        const active = symbols.includes(elements.symbolSelect.value) ? elements.symbolSelect.value : symbols[0];
+        elements.symbolSelect.value = active;
+        elements.chartTitle.textContent = `${active} Candlestick`;
     } else {
-        chartTitle.textContent = "Candlestick Chart";
+        elements.chartTitle.textContent = "Candlestick Chart";
     }
 }
 
@@ -272,7 +461,7 @@ function getActiveSymbol() {
     if (!latestData || !Array.isArray(latestData.symbols) || !latestData.symbols.length) {
         return null;
     }
-    const candidate = symbolSelect.value;
+    const candidate = elements.symbolSelect.value;
     if (candidate && latestData.symbols.includes(candidate)) {
         return candidate;
     }
@@ -288,22 +477,22 @@ function getSymbolResult(symbol) {
 
 function renderSymbolData() {
     if (!latestData) {
-        Plotly.purge(chartEl);
-        Plotly.purge(equityEl);
-        paperMetricsEl.innerHTML = "";
-        trainingMetricsEl.innerHTML = "";
-        parameterMetricsEl.innerHTML = "";
-        rankingTableBody.innerHTML = "";
-        paperWindowEl.textContent = "";
-        trainingWindowEl.textContent = "";
+        Plotly.purge(elements.chart);
+        Plotly.purge(elements.equityChart);
+        elements.paperMetrics.innerHTML = "";
+        elements.trainingMetrics.innerHTML = "";
+        elements.parameterMetrics.innerHTML = "";
+        elements.rankingTableBody.innerHTML = "";
+        elements.paperWindow.textContent = "";
+        elements.trainingWindow.textContent = "";
         setStatus("Run an optimization to see results.", "info");
         return;
     }
 
     const symbol = getActiveSymbol();
     if (!symbol) {
-        Plotly.purge(chartEl);
-        Plotly.purge(equityEl);
+        Plotly.purge(elements.chart);
+        Plotly.purge(elements.equityChart);
         setStatus("No symbols returned from optimization.", "warning");
         return;
     }
@@ -315,37 +504,10 @@ function renderSymbolData() {
     updateStatusForSymbol(symbol, result);
 }
 
-function updateStatusForSymbol(symbol, result) {
-    if (!symbol || !result) {
-        setStatus(`No optimization output for ${symbol || "selected symbol"}.`, "warning");
-        return;
-    }
-    const optimization = result.optimization || {};
-    const trainingRange = formatRange(optimization.training);
-    const paperRange = formatRange(optimization.paper);
-    let message = `Optimized ${latestData.symbols?.length || 0} symbol(s). Showing ${symbol} — Train ${trainingRange}, Paper ${paperRange}.`;
-    let level = "success";
-    if (latestData.warnings) {
-        const missing = Array.isArray(latestData.warnings.missing)
-            ? latestData.warnings.missing
-                .map((item) => item.symbol || item.path || item.reason)
-                .filter(Boolean)
-                .join(", ")
-            : "";
-        if (missing) {
-            message += ` Missing: ${missing}`;
-        } else if (latestData.warnings.message) {
-            message += ` ${latestData.warnings.message}`;
-        }
-        level = "warning";
-    }
-    setStatus(message, level);
-}
-
 function renderCandles(symbol, result) {
     if (!result || !Array.isArray(result.candles) || !result.candles.length) {
-        Plotly.purge(chartEl);
-        chartTitle.textContent = symbol ? `${symbol} Candlestick (no data)` : "Candlestick Chart";
+        Plotly.purge(elements.chart);
+        elements.chartTitle.textContent = symbol ? `${symbol} Candlestick (no data)` : "Candlestick Chart";
         return;
     }
 
@@ -389,13 +551,13 @@ function renderCandles(symbol, result) {
 
     const config = { responsive: true, displaylogo: false };
     const traces = buys.length ? [traceCandles, traceBuys] : [traceCandles];
-    Plotly.newPlot(chartEl, traces, layout, config);
-    chartTitle.textContent = `${symbol} Candlestick`;
+    Plotly.newPlot(elements.chart, traces, layout, config);
+    elements.chartTitle.textContent = `${symbol} Candlestick`;
 }
 
 function renderEquity(result) {
     if (!result || !Array.isArray(result.equity_curve) || !result.equity_curve.length) {
-        Plotly.purge(equityEl);
+        Plotly.purge(elements.equityChart);
         return;
     }
 
@@ -415,32 +577,33 @@ function renderEquity(result) {
         hovermode: "x unified",
     };
 
-    Plotly.newPlot(equityEl, [trace], layout, { responsive: true, displaylogo: false });
+    Plotly.newPlot(elements.equityChart, [trace], layout, { responsive: true, displaylogo: false });
 }
 
 function renderOptimization(result) {
     if (!result || !result.optimization) {
-        paperMetricsEl.innerHTML = "";
-        trainingMetricsEl.innerHTML = "";
-        parameterMetricsEl.innerHTML = "";
-        rankingTableBody.innerHTML = "";
-        paperWindowEl.textContent = "";
-        trainingWindowEl.textContent = "";
+        elements.paperMetrics.innerHTML = "";
+        elements.trainingMetrics.innerHTML = "";
+        elements.parameterMetrics.innerHTML = "";
+        elements.rankingTableBody.innerHTML = "";
+        elements.paperWindow.textContent = "";
+        elements.trainingWindow.textContent = "";
         if (result?.metrics) {
-            renderMetricCards(paperMetricsEl, buildMetricRows(result.metrics));
+            renderMetricCards(elements.paperMetrics, buildMetricRows(result.metrics));
         }
         return;
     }
 
     const { paper, training, best_parameters: bestParams, rankings } = result.optimization;
+    const strategy = result.strategy || latestData.strategy || getSelectedStrategy();
 
-    renderMetricCards(paperMetricsEl, buildMetricRows(paper?.metrics || result.metrics));
-    renderMetricCards(trainingMetricsEl, buildMetricRows(training?.metrics));
-    renderParameterCards(bestParams);
+    renderMetricCards(elements.paperMetrics, buildMetricRows(paper?.metrics || result.metrics));
+    renderMetricCards(elements.trainingMetrics, buildMetricRows(training?.metrics));
+    renderParameterCards(bestParams, strategy);
     renderRankingTable(rankings || []);
 
-    paperWindowEl.textContent = `Window: ${formatRange(paper)}`;
-    trainingWindowEl.textContent = `Window: ${formatRange(training)}`;
+    elements.paperWindow.textContent = `Window: ${formatRange(paper)}`;
+    elements.trainingWindow.textContent = `Window: ${formatRange(training)}`;
 }
 
 function buildMetricRows(metrics) {
@@ -479,31 +642,21 @@ function renderMetricCards(container, rows) {
         .join("");
 }
 
-function renderParameterCards(params) {
-    if (!parameterMetricsEl) {
+function renderParameterCards(params, strategy) {
+    if (!elements.parameterMetrics) {
         return;
     }
     if (!params) {
-        parameterMetricsEl.innerHTML = "<p class=\"metric-empty\">No parameters selected</p>";
+        elements.parameterMetrics.innerHTML = "<p class=\"metric-empty\">No parameters selected</p>";
         return;
     }
 
-    const rows = [
-        { label: "Entry RSI", value: formatNumber(params.entry_threshold, 0) },
-        { label: "Exit RSI", value: formatNumber(params.exit_threshold, 0) },
-        { label: "Max Hold Days", value: formatNumber(params.max_hold_days, 0) },
-        { label: "Target Position", value: formatPercent(params.target_position_pct) },
-        {
-            label: "Stop Loss",
-            value:
-                params.stop_loss_pct === null || params.stop_loss_pct === undefined
-                    ? "None"
-                    : formatPercent(params.stop_loss_pct),
-        },
-        { label: "Lot Size", value: formatNumber(params.lot_size, 0) },
-    ];
+    const entries = Object.entries(params).map(([key, value]) => ({
+        label: formatParameterLabel(key),
+        value: formatParameterValue(key, value, strategy),
+    }));
 
-    parameterMetricsEl.innerHTML = rows
+    elements.parameterMetrics.innerHTML = entries
         .map(
             (row) => `
         <div class="metric-card">
@@ -516,15 +669,15 @@ function renderParameterCards(params) {
 }
 
 function renderRankingTable(rows) {
-    if (!rankingTableBody) {
+    if (!elements.rankingTableBody) {
         return;
     }
     if (!rows.length) {
-        rankingTableBody.innerHTML = "<tr><td colspan=\"4\">No candidate parameters evaluated</td></tr>";
+        elements.rankingTableBody.innerHTML = "<tr><td colspan=\"4\">No candidate parameters evaluated</td></tr>";
         return;
     }
 
-    rankingTableBody.innerHTML = rows
+    elements.rankingTableBody.innerHTML = rows
         .map((row) => {
             const cagr = formatPercent(row.cagr);
             const totalReturn = formatPercent(row.total_return);
@@ -541,9 +694,81 @@ function renderRankingTable(rows) {
         .join("");
 }
 
+function updateStatusForSymbol(symbol, result) {
+    if (!symbol || !result) {
+        setStatus(`No optimization output for ${symbol || "selected symbol"}.`, "warning");
+        return;
+    }
+    const optimization = result.optimization || {};
+    const trainingRange = formatRange(optimization.training);
+    const paperRange = formatRange(optimization.paper);
+    const strategy = formatStrategyName(result.strategy || latestData.strategy || getSelectedStrategy());
+    let message = `Optimized ${latestData.symbols?.length || 0} symbol(s) with ${strategy}. Showing ${symbol} — Train ${trainingRange}, Paper ${paperRange}.`;
+    let level = "success";
+    if (latestData.warnings) {
+        const missing = Array.isArray(latestData.warnings.missing)
+            ? latestData.warnings.missing
+                .map((item) => item.symbol || item.path || item.reason)
+                .filter(Boolean)
+                .join(", ")
+            : "";
+        if (missing) {
+            message += ` Missing: ${missing}`;
+        } else if (latestData.warnings.message) {
+            message += ` ${latestData.warnings.message}`;
+        }
+        level = "warning";
+    }
+    setStatus(message, level);
+}
+
 function setStatus(message, level = "info") {
-    statusEl.textContent = message;
-    statusEl.className = `status ${level}`;
+    if (!elements.status) {
+        return;
+    }
+    elements.status.textContent = message;
+    elements.status.className = `status ${level}`;
+}
+
+function formatParameterLabel(key) {
+    return key
+        .split("_")
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+}
+
+function formatParameterValue(key, value, strategy) {
+    if (value === null || value === undefined) {
+        return "None";
+    }
+    if (typeof value === "number") {
+        if (key.includes("_pct")) {
+            return formatPercent(value);
+        }
+        if (key.includes("_ratio") || key.includes("ratio")) {
+            return formatNumber(value);
+        }
+        if (key.includes("hold_days") && value === 0) {
+            return "Infinite";
+        }
+        if (Number.isInteger(value)) {
+            return formatNumber(value, 0);
+        }
+        return formatNumber(value);
+    }
+    if (Array.isArray(value)) {
+        return value.map((item) => formatParameterValue(key, item, strategy)).join(", ");
+    }
+    if (typeof value === "string") {
+        if (key === "pattern" || key.includes("pattern")) {
+            return formatStrategyName(value);
+        }
+        return value
+            .split("_")
+            .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+            .join(" ");
+    }
+    return value;
 }
 
 function formatCurrency(value) {
@@ -603,15 +828,23 @@ function formatDate(value) {
     return parsed.toISOString().split("T")[0];
 }
 
-form.addEventListener("submit", runBacktest);
-symbolSelect.addEventListener("change", () => {
-    renderSymbolData();
-});
+function getSelectedStrategy() {
+    if (elements.strategySelect && elements.strategySelect.value) {
+        return elements.strategySelect.value;
+    }
+    if (pageId === "breakout") {
+        return STRATEGY_BREAKOUT;
+    }
+    return STRATEGY_MEAN_REVERSION;
+}
 
-document.addEventListener("DOMContentLoaded", async () => {
-    handleStopRangeToggle();
-    applyStopSingleState();
-    handleHoldOnlyInfiniteToggle();
-    await loadAvailableSymbols();
-    await runBacktest();
-});
+function formatStrategyName(value) {
+    const normalized = value || "";
+    return normalized
+        .toString()
+        .split("_")
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+}
+
+document.addEventListener("DOMContentLoaded", initialize);

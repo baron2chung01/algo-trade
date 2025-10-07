@@ -101,7 +101,7 @@ The engine stitches daily bars from the local Parquet cache, filters iterations 
   strategy = MeanReversionStrategy(
         MeanReversionConfig(
               symbols=["AAPL", "MSFT"],
-              initial_cash=100_000.0,
+        initial_cash=10_000.0,
               target_position_pct=0.2,
               max_positions=3,
               max_hold_days=5,
@@ -120,7 +120,7 @@ Use the experiment runner to sweep RSI(2) parameters across walk-forward splits 
    {
      "store_path": "data/raw/quantconnect/daily",
      "symbols": ["AAPL", "MSFT", "GOOGL"],
-     "initial_cash": 100000,
+     "initial_cash": 10000,
      "splits": [
        { "name": "train", "start": "2019-01-01", "end": "2022-12-31" },
        { "name": "validate", "start": "2023-01-01", "end": "2023-12-31" },

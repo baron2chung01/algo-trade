@@ -21,7 +21,7 @@ class BacktestConfig:
     start: date | None = None
     end: date | None = None
     bar_size: str = "1d"
-    initial_cash: float = 100_000.0
+    initial_cash: float = 10_000.0
     commission_model: CommissionModel | None = None
     slippage_model: SlippageModel | None = None
     calendar_name: str = "XNYS"
