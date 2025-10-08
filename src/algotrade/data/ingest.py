@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 
 import pandas as pd
+import requests
+import time
 
 from ..config import AppSettings
 from .contracts import ContractSpec
@@ -49,6 +51,51 @@ class IncrementalUpdateReport:
     warnings: list[str] = field(default_factory=list)
 
 
+class _RateLimiter:
+    """Simple per-minute request rate limiter."""
+
+    def __init__(
+        self,
+        max_requests_per_minute: int,
+        *,
+        window_seconds: float = 60.0,
+        now: Callable[[], float] | None = None,
+        sleeper: Callable[[float], None] | None = None,
+    ) -> None:
+        self._max_requests = max_requests_per_minute
+        self._window_seconds = window_seconds
+        self._now = now or time.monotonic
+        self._sleep = sleeper or time.sleep
+        self._window_start = self._now()
+        self._count = 0
+
+    def _reset_window(self, current_time: float) -> None:
+        self._window_start = current_time
+        self._count = 0
+
+    def before_request(self) -> None:
+        if self._max_requests <= 0:
+            return
+
+        current_time = self._now()
+        elapsed = current_time - self._window_start
+        if elapsed >= self._window_seconds:
+            self._reset_window(current_time)
+            return
+
+        if self._count >= self._max_requests:
+            wait_for = self._window_seconds - elapsed
+            if wait_for > 0:
+                self._sleep(wait_for)
+            current_time = self._now()
+            self._reset_window(current_time)
+
+    def record_request(self) -> None:
+        if self._max_requests <= 0:
+            return
+        self._count += 1
+
+
 def ingest_quantconnect_daily(
     symbols: Iterable[str],
     start: date,
@@ -64,18 +111,24 @@ def ingest_quantconnect_daily(
     Parameters
     ----------
     symbols:
-        Iterable of ticker symbols (e.g., ["AAPL", "MSFT"]).
+        Iterable of ticker symbols to download.
     start:
         Start date (inclusive).
     end:
         End date (inclusive).
     settings:
         Optional application settings. If omitted, defaults will be loaded from environment.
+    provider:
+        Optional provider instance. When omitted a new provider is created and closed after use.
+    store:
+        Optional bar store. When omitted data is written to the default raw data directory.
+    write:
+        When ``False``, skip writing frames to disk and only return them in memory.
 
     Returns
     -------
-    list[Path]
-        Paths to the Parquet files written for each symbol.
+    IngestResult
+        Summary of written paths and in-memory frames.
     """
 
     settings = settings or AppSettings()
@@ -127,6 +180,8 @@ def ingest_polygon_daily(
     store: ParquetBarStore | None = None,
     *,
     write: bool = True,
+    rate_limit_per_minute: int | None = 5,
+    _rate_limiter: _RateLimiter | None = None,
 ) -> IngestResult:
     """Download Polygon daily bars and store them as Parquet files."""
 
@@ -144,6 +199,9 @@ def ingest_polygon_daily(
     end_dt = datetime.combine(end, datetime.min.time()
                               ).replace(tzinfo=timezone.utc)
     duration = _duration_from_dates(start, end)
+    rate_limiter = _rate_limiter
+    if rate_limiter is None and rate_limit_per_minute and rate_limit_per_minute > 0:
+        rate_limiter = _RateLimiter(rate_limit_per_minute)
 
     for symbol in symbols:
         normalized_symbol = symbol.upper()
@@ -155,7 +213,13 @@ def ingest_polygon_daily(
             what_to_show="TRADES",
             use_rth=True,
         )
-        df = provider.fetch_historical_bars(request)
+        if rate_limiter is not None:
+            rate_limiter.before_request()
+        try:
+            df = provider.fetch_historical_bars(request)
+        finally:
+            if rate_limiter is not None:
+                rate_limiter.record_request()
         if df.empty:
             continue
         result.frames[normalized_symbol] = df
@@ -174,6 +238,8 @@ def update_polygon_daily_incremental(
     provider: PolygonDailyEquityProvider | None = None,
     store: ParquetBarStore | None = None,
     lookback_years: int = 5,
+    rate_limit_per_minute: int | None = 5,
+    _rate_limiter: _RateLimiter | None = None,
 ) -> IncrementalUpdateReport:
     """Update Polygon daily bars by fetching only missing rows for each symbol.
 
@@ -210,6 +276,9 @@ def update_polygon_daily_incremental(
     end_dt = datetime.combine(today, datetime.min.time()).replace(
         tzinfo=timezone.utc
     )
+    rate_limiter = _rate_limiter
+    if rate_limiter is None and rate_limit_per_minute and rate_limit_per_minute > 0:
+        rate_limiter = _RateLimiter(rate_limit_per_minute)
 
     for raw_symbol in symbols:
         symbol = raw_symbol.upper().strip()
@@ -253,7 +322,44 @@ def update_polygon_daily_incremental(
             use_rth=True,
         )
 
-        df_new = provider.fetch_historical_bars(request)
+        if rate_limiter is not None:
+            rate_limiter.before_request()
+        try:
+            df_new = provider.fetch_historical_bars(request)
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            reason = exc.response.reason if exc.response is not None else ""
+            report.skipped.append(symbol)
+            if status_code == 429:
+                report.warnings.append(
+                    "Polygon rate limit reached while downloading daily history. Wait about a minute and try again."
+                )
+                break
+
+            sanitized_reason = reason or ""
+            message = f"Polygon request failed for {symbol}"
+            if status_code is not None:
+                message += f" (HTTP {status_code})"
+            if sanitized_reason:
+                message += f": {sanitized_reason}"
+            report.warnings.append(message)
+            continue
+        except requests.RequestException as exc:
+            report.skipped.append(symbol)
+            report.warnings.append(
+                f"Network error while downloading {symbol} history from Polygon: {exc}"
+            )
+            continue
+        except RuntimeError as exc:
+            report.skipped.append(symbol)
+            report.warnings.append(
+                f"Polygon returned an error for {symbol}: {exc}"
+            )
+            continue
+        finally:
+            if rate_limiter is not None:
+                rate_limiter.record_request()
+
         if df_new.empty:
             report.skipped.append(symbol)
             continue

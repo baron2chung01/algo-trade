@@ -27,6 +27,8 @@ from ..experiments import (
     VCPParameters,
     VCPPatternDetection,
     VCPPatternSeries,
+    DEFAULT_VCP_SCAN_CRITERIA,
+    VCP_SCAN_CRITERIA_LABELS,
     default_vcp_spec,
     default_vcp_scan_universe,
     optimize_breakout_parameters,
@@ -35,7 +37,7 @@ from ..experiments import (
     VCPScanCandidate,
     scan_vcp_candidates,
     scan_vcp_history,
-    technology_universe_symbols,
+    liquid_universe_symbols,
 )
 from ..experiments.mean_reversion import HoldRange, OptimizationParameterSpec, ParameterRange
 from ..strategies import BreakoutPattern
@@ -60,10 +62,16 @@ class VCPScanTimeframe(str, Enum):
     LONG = "long"
 
 
+class VCPScanCriterion(str, Enum):
+    FLAG_VCP = "flag_vcp"
+    MINERVINI = "minervini"
+    QULLAMAGIE = "qullamagie"
+
+
 class VCPFetchRequest(BaseModel):
     force_refresh_universe: bool = Field(
         default=True,
-        description="When true, refresh the technology universe membership before fetching data.",
+        description="When true, refresh the liquid US equity universe before fetching data.",
     )
     lookback_years: int = Field(
         default=5,
@@ -427,10 +435,13 @@ class OptimizationRequest(BaseModel):
 
 class VCPScanRequest(BaseModel):
     timeframe: VCPScanTimeframe = Field(default=VCPScanTimeframe.MEDIUM)
-    overrides: Dict[str, float | int | None] | None = Field(default=None)
     store_path: str | None = None
     bar_size: str = Field(DEFAULT_BAR_SIZE, description="Historical bar size")
     symbols: List[str] | None = Field(default=None)
+    criteria: List[VCPScanCriterion] | None = Field(
+        default=None,
+        description="Subset of scan criteria to enforce",
+    )
     max_candidates: int = Field(50, ge=0)
     include_warnings: bool = True
 
@@ -456,15 +467,26 @@ class VCPScanRequest(BaseModel):
         else:
             self.symbols = None
 
-        if self.overrides:
-            normalized: Dict[str, float | int | None] = {}
-            for key, value in self.overrides.items():
-                key = key.strip()
-                if key not in _VCP_PARAMETER_FIELDS:
-                    raise ValueError(f"Unsupported override '{key}'.")
-                normalized[key] = value
-            self.overrides = normalized or None
-
+        if self.criteria:
+            requested: list[str] = []
+            for criterion in self.criteria:
+                value = criterion.value if isinstance(
+                    criterion, VCPScanCriterion
+                ) else str(criterion).strip().lower()
+                if value not in VCP_SCAN_CRITERIA_LABELS:
+                    raise ValueError(f"Unsupported criterion '{criterion}'.")
+                requested.append(value)
+            normalized: list[str] = []
+            for key in DEFAULT_VCP_SCAN_CRITERIA:
+                if key in requested and key not in normalized:
+                    normalized.append(key)
+            if not normalized:
+                normalized = list(DEFAULT_VCP_SCAN_CRITERIA)
+            self.criteria = [VCPScanCriterion(key)
+                             for key in normalized]
+        else:
+            self.criteria = [VCPScanCriterion(key)
+                             for key in DEFAULT_VCP_SCAN_CRITERIA]
         return self
 
 
@@ -607,14 +629,16 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
     ) -> JSONResponse:
         params = request_body or VCPFetchRequest()
 
-        symbols, universe_warnings = technology_universe_symbols(
+        symbols, universe_warnings = liquid_universe_symbols(
             force_refresh=params.force_refresh_universe
         )
         if not symbols:
-            raise HTTPException(
-                status_code=503,
-                detail="No technology-sector symbols available from Polygon.",
-            )
+            detail_payload: Dict[str, object] = {
+                "message": "No liquid US equity symbols available from Polygon."
+            }
+            if universe_warnings:
+                detail_payload["warnings"] = universe_warnings
+            raise HTTPException(status_code=503, detail=detail_payload)
 
         try:
             report = update_polygon_daily_incremental(
@@ -798,10 +822,11 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
             summary = scan_vcp_candidates(
                 store_path=store_root,
                 timeframe=request_body.timeframe.value,
-                overrides=request_body.overrides,
                 bar_size=request_body.bar_size,
                 symbols=request_body.symbols,
                 max_candidates=request_body.max_candidates,
+                criteria=[
+                    criterion.value for criterion in request_body.criteria],
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1014,15 +1039,15 @@ def _serialize_scan_candidate(candidate: VCPScanCandidate) -> Dict[str, Any]:
     return {
         "symbol": candidate.symbol,
         "close_price": float(candidate.close_price),
-        "entry_price": float(candidate.entry_price),
-        "stop_price": float(candidate.stop_price),
-        "target_price": float(candidate.target_price),
-        "risk_per_share": float(candidate.risk_per_share),
-        "reward_to_risk": float(candidate.reward_to_risk),
-        "resistance": float(candidate.resistance),
-        "base_low": float(candidate.base_low),
-        "breakout_timestamp": _to_iso(candidate.breakout_timestamp),
-        "volume": float(candidate.volume) if candidate.volume is not None else None,
+        "monthly_dollar_volume": float(candidate.monthly_dollar_volume),
+        "rs_percentile": float(candidate.rs_percentile) if candidate.rs_percentile is not None else None,
+        "qullamagie_score": float(candidate.qullamagie_score),
+        "flag_vcp_pass": bool(candidate.flag_vcp_pass),
+        "weekly_contraction": bool(candidate.weekly_contraction),
+        "monthly_contraction": bool(candidate.monthly_contraction),
+        "minervini_pass": bool(candidate.minervini_pass),
+        "qullamagie_pass": bool(candidate.qullamagie_pass),
+        "analysis_timestamp": _to_iso(candidate.analysis_timestamp),
     }
 
 

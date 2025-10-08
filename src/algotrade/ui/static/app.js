@@ -32,6 +32,7 @@ const elements = {
     scanTimeframe: document.getElementById("scan-timeframe"),
     scanMaxCandidates: document.getElementById("scan-max-candidates"),
     scanSymbolsInput: document.getElementById("scan-symbols"),
+    scanCriteriaInputs: document.querySelectorAll("[data-scan-criterion]"),
     scanSummaryTimeframe: document.getElementById("scan-summary-timeframe"),
     scanSummaryParams: document.getElementById("scan-summary-params"),
     scanSummarySymbols: document.getElementById("scan-summary-symbols"),
@@ -96,8 +97,13 @@ const vcpControls = {
     annealingSettings: document.getElementById("vcp-annealing-settings"),
 };
 
-const SCAN_OVERRIDE_SELECTOR = "[data-param]";
-const SCAN_TABLE_COLUMNS = 8;
+const SCAN_TABLE_COLUMNS = 10;
+const DEFAULT_SCAN_CRITERIA = ["flag_vcp", "minervini", "qullamagie"];
+const SCAN_CRITERIA_LABELS = {
+    flag_vcp: "Flag/VCP",
+    minervini: "Minervini Criteria",
+    qullamagie: "Qullamagie Criteria",
+};
 
 let latestData = null;
 let latestScanResult = null;
@@ -141,7 +147,7 @@ function setupTechDataFetch() {
         return;
     }
     if (!button.dataset.originalLabel) {
-        button.dataset.originalLabel = button.textContent?.trim() || "Fetch Tech Data";
+        button.dataset.originalLabel = button.textContent?.trim() || "Fetch US Liquidity";
     }
     button.addEventListener("click", handleTechDataFetch);
 }
@@ -156,7 +162,7 @@ async function handleTechDataFetch(event) {
         return;
     }
 
-    const originalLabel = button.dataset.originalLabel || button.textContent?.trim() || "Fetch Tech Data";
+    const originalLabel = button.dataset.originalLabel || button.textContent?.trim() || "Fetch US Liquidity";
     button.dataset.originalLabel = originalLabel;
 
     button.disabled = true;
@@ -164,8 +170,8 @@ async function handleTechDataFetch(event) {
 
     const forceRefresh = !(event?.shiftKey);
     const statusMessage = forceRefresh
-        ? "Refreshing technology universe and downloading Polygon history…"
-        : "Downloading Polygon history for cached technology universe…";
+        ? "Refreshing liquidity-filtered US universe and downloading Polygon history…"
+        : "Downloading Polygon history for cached US liquidity universe…";
     setGlobalStatus(statusMessage, "info");
 
     try {
@@ -177,7 +183,23 @@ async function handleTechDataFetch(event) {
 
         if (!response.ok) {
             const errorMessage = await readErrorMessage(response);
-            throw new Error(errorMessage);
+            let errorWarnings = [];
+            try {
+                const data = await response.clone().json();
+                const detail = typeof data === "object" && data !== null ? data.detail : null;
+                if (Array.isArray(detail?.warnings)) {
+                    errorWarnings = detail.warnings
+                        .map((message) => (typeof message === "string" ? message.trim() : ""))
+                        .filter(Boolean);
+                }
+            } catch (parseError) {
+                // ignore JSON parse failures for error detail extraction
+            }
+            const error = new Error(errorMessage);
+            if (errorWarnings.length) {
+                error.warnings = errorWarnings;
+            }
+            throw error;
         }
 
         const data = await response.json();
@@ -187,8 +209,13 @@ async function handleTechDataFetch(event) {
             prefillScanSymbols();
         }
     } catch (error) {
-        console.error("Failed to refresh technology-sector data", error);
-        setGlobalStatus(error?.message || "Failed to refresh technology data.", "error");
+        console.error("Failed to refresh US liquidity universe", error);
+        const warnings = Array.isArray(error?.warnings) ? error.warnings : [];
+        let message = error?.message || "Failed to refresh US liquidity universe.";
+        if (warnings.length) {
+            message = `${message} — ${warnings.join(" | ")}`;
+        }
+        setGlobalStatus(message, "error");
     } finally {
         button.disabled = false;
         button.textContent = button.dataset.originalLabel || originalLabel;
@@ -226,7 +253,7 @@ function renderTechFetchResult(result) {
             `Added ${updatedRows} new daily row${updatedRows === 1 ? "" : "s"} across ${updatedSymbolCount} symbol${updatedSymbolCount === 1 ? "" : "s"}${preview}.`,
         );
     } else {
-        summaryParts.push("All technology symbols are already up to date.");
+        summaryParts.push("All tracked symbols are already up to date.");
     }
 
     if (skippedCount) {
@@ -239,7 +266,7 @@ function renderTechFetchResult(result) {
 
     const level = warnings.length ? "warning" : updatedRows > 0 ? "success" : "info";
     const message = summaryParts.join(" ").trim();
-    setGlobalStatus(message || "Technology universe refresh complete.", level);
+    setGlobalStatus(message || "US liquidity universe refresh complete.", level);
 }
 
 function setGlobalStatus(message, level = "info") {
@@ -363,9 +390,9 @@ function buildScanRequest() {
     if (symbols.length) {
         request.symbols = symbols;
     }
-    const overrides = collectScanOverrides();
-    if (Object.keys(overrides).length) {
-        request.overrides = overrides;
+    const criteria = collectScanCriteria();
+    if (criteria.length) {
+        request.criteria = criteria;
     }
     return request;
 }
@@ -373,6 +400,29 @@ function buildScanRequest() {
 function collectScanSymbols() {
     const raw = elements.scanSymbolsInput?.value || "";
     return Array.from(new Set(parseSymbolList(raw)));
+}
+
+function collectScanCriteria() {
+    const inputs = Array.from(elements.scanCriteriaInputs || []);
+    if (!inputs.length) {
+        return [...DEFAULT_SCAN_CRITERIA];
+    }
+    const selected = inputs
+        .filter((input) => input.checked)
+        .map((input) => input.value || input.dataset.value)
+        .filter((value) => typeof value === "string" && value.trim());
+    if (selected.length) {
+        return selected;
+    }
+    inputs.forEach((input, index) => {
+        if (index < DEFAULT_SCAN_CRITERIA.length) {
+            input.checked = true;
+        }
+    });
+    return inputs
+        .map((input) => input.value || input.dataset.value)
+        .filter((value) => typeof value === "string" && value.trim())
+        .slice(0, DEFAULT_SCAN_CRITERIA.length);
 }
 
 async function prefillScanSymbols() {
@@ -394,7 +444,7 @@ async function prefillScanSymbols() {
         const initialWarnings = [];
         if (Array.isArray(payload.missing) && payload.missing.length) {
             initialWarnings.push(
-                `Missing cached data for ${payload.missing.length} technology-sector symbol${payload.missing.length === 1 ? "" : "s"}.`,
+                `Missing cached data for ${payload.missing.length} liquid-universe symbol${payload.missing.length === 1 ? "" : "s"}.`,
             );
         }
         if (Array.isArray(payload.warnings)) {
@@ -410,26 +460,6 @@ async function prefillScanSymbols() {
     } catch (error) {
         console.warn("Unable to prefill VCP scan symbols", error);
     }
-}
-
-function collectScanOverrides() {
-    if (!elements.scanForm) {
-        return {};
-    }
-    const overrides = {};
-    elements.scanForm.querySelectorAll(SCAN_OVERRIDE_SELECTOR).forEach((input) => {
-        const key = input.getAttribute("data-param");
-        if (!key) {
-            return;
-        }
-        const rawValue = typeof input.value === "string" ? input.value.trim() : "";
-        if (!rawValue) {
-            return;
-        }
-        const numeric = Number(rawValue);
-        overrides[key] = Number.isFinite(numeric) ? numeric : rawValue;
-    });
-    return overrides;
 }
 
 function parseSymbolList(raw) {
@@ -1132,26 +1162,19 @@ function summarizeScanParameters(parameters) {
     if (!parameters) {
         return "–";
     }
-    const parts = [];
-    if (parameters.base_lookback_days !== undefined) {
-        parts.push(`Base ${formatNumber(parameters.base_lookback_days, 0)}d`);
+    const criteria = Array.isArray(parameters.criteria) ? parameters.criteria : [];
+    if (criteria.length) {
+        const labels = criteria
+            .map((key) => SCAN_CRITERIA_LABELS[key] || key)
+            .filter((label) => typeof label === "string" && label.trim());
+        if (labels.length) {
+            return labels.join(" + ");
+        }
     }
-    if (parameters.pivot_lookback_days !== undefined) {
-        parts.push(`Pivot ${formatNumber(parameters.pivot_lookback_days, 0)}d`);
+    if (typeof parameters.rule_set === "string" && parameters.rule_set.trim()) {
+        return parameters.rule_set;
     }
-    if (parameters.min_contractions !== undefined) {
-        parts.push(`Contractions ${formatNumber(parameters.min_contractions, 0)}`);
-    }
-    if (parameters.breakout_buffer_pct !== undefined) {
-        parts.push(`Buffer ${formatPercent(parameters.breakout_buffer_pct)}`);
-    }
-    if (parameters.volume_squeeze_ratio !== undefined) {
-        parts.push(`Squeeze ${formatNumber(parameters.volume_squeeze_ratio)}`);
-    }
-    if (parameters.breakout_volume_ratio !== undefined) {
-        parts.push(`Volume ${formatNumber(parameters.breakout_volume_ratio)}`);
-    }
-    return parts.length ? parts.join(" • ") : "–";
+    return "All criteria";
 }
 
 function renderScanCandidates(candidates) {
@@ -1165,21 +1188,24 @@ function renderScanCandidates(candidates) {
 
     const rows = candidates
         .map((candidate) => {
-            const rewardToRisk = formatNumber(candidate.reward_to_risk, 2);
-            const volume = formatNumber(candidate.volume, 0);
-            const breakoutTimestamp = formatDateTime(candidate.breakout_timestamp);
+            const dollarVolume = formatCurrency(candidate.monthly_dollar_volume);
+            const rsPercentile = candidate.rs_percentile === null || candidate.rs_percentile === undefined
+                ? "–"
+                : formatNumber(candidate.rs_percentile, 1);
             return `
-        <tr>
-          <td>${candidate.symbol || ""}</td>
-          <td>${formatCurrency(candidate.close_price)}</td>
-          <td>${formatCurrency(candidate.entry_price)}</td>
-          <td>${formatCurrency(candidate.stop_price)}</td>
-          <td>${formatCurrency(candidate.target_price)}</td>
-          <td>${rewardToRisk}</td>
-          <td>${volume}</td>
-          <td>${breakoutTimestamp}</td>
-        </tr>
-      `;
+                <tr>
+                    <td>${candidate.symbol || ""}</td>
+                    <td>${formatCurrency(candidate.close_price)}</td>
+                    <td>${dollarVolume}</td>
+                    <td>${rsPercentile}</td>
+                    <td>${candidate.flag_vcp_pass ? "Yes" : "No"}</td>
+                    <td>${candidate.weekly_contraction ? "Yes" : "No"}</td>
+                    <td>${candidate.monthly_contraction ? "Yes" : "No"}</td>
+                    <td>${candidate.minervini_pass ? "Yes" : "No"}</td>
+                    <td>${formatNumber(candidate.qullamagie_score, 2)}</td>
+                    <td>${candidate.qullamagie_pass ? "Yes" : "No"}</td>
+                </tr>
+            `;
         })
         .join("");
     elements.scanTableBody.innerHTML = rows;

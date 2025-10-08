@@ -2,12 +2,12 @@ import json
 from pathlib import Path
 
 import pytest
-import requests
 
 from algotrade.config import AppSettings, DataPaths
 from algotrade.experiments.vcp import (
-    _TECH_UNIVERSE_CACHE,
-    _load_technology_universe,
+    _LIQUID_UNIVERSE_CACHE,
+    _fetch_polygon_liquid_symbols,
+    _load_liquid_universe,
 )
 
 
@@ -17,104 +17,133 @@ def _make_settings(tmp_path: Path) -> AppSettings:
     return AppSettings(data_paths=data_paths)
 
 
-def test_load_technology_universe_scrape_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    settings = _make_settings(tmp_path)
-
-    monkeypatch.setattr(
-        "algotrade.experiments.vcp._fetch_polygon_technology_symbols",
-        lambda _settings: ([], ["Polygon API returned no symbols."]),
-    )
-
-    monkeypatch.setattr(
-        "algotrade.experiments.vcp._scrape_nasdaq_technology_symbols",
-        lambda: (["AAPL", "MSFT"], [
-                 "Scraped technology symbols from test-source."]),
-    )
-
-    symbols, warnings = _load_technology_universe(settings, force_refresh=True)
-
-    assert symbols == ["AAPL", "MSFT"]
-    assert any("test-source" in message for message in warnings)
-
-    cache_path = settings.data_paths.cache / _TECH_UNIVERSE_CACHE
-    assert cache_path.exists()
-
-    payload = json.loads(cache_path.read_text(encoding="utf-8"))
-    assert payload["source"] == "web"
-    assert payload["symbols"] == symbols
-
-
-def test_scrape_nasdaq_from_wikipedia(monkeypatch: pytest.MonkeyPatch) -> None:
-    from algotrade.experiments.vcp import _scrape_nasdaq_technology_symbols
-
-    html = """
-    <table>
-        <thead>
-            <tr>
-                <th>Ticker</th>
-                <th>GICS Sector</th>
-            </tr>
-        </thead>
-        <tbody>
-            <tr><td>AAPL</td><td>Information Technology</td></tr>
-            <tr><td>MSFT</td><td>Information Technology</td></tr>
-            <tr><td>GOOG</td><td>Communication Services</td></tr>
-        </tbody>
-    </table>
-    """
-
+def test_fetch_polygon_liquid_symbols_filters_by_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeResponse:
-        def __init__(self, text: str, status_code: int = 200) -> None:
-            self.text = text
+        def __init__(self, payload: dict, status_code: int = 200) -> None:
+            self._payload = payload
             self.status_code = status_code
+
+        def json(self) -> dict:
+            return self._payload
 
         def raise_for_status(self) -> None:
             if self.status_code >= 400:
-                raise requests.HTTPError(f"{self.status_code} error")
+                raise RuntimeError(f"HTTP {self.status_code}")
 
-    urls: list[str] = []
+    responses = iter(
+        [
+            FakeResponse(
+                {
+                    "results": [
+                        {"T": "AAPL", "v": 6000, "c": 150},
+                        {"T": "LOWV", "v": 1000, "c": 12},
+                    ]
+                }
+            ),
+            FakeResponse(
+                {
+                    "results": [
+                        {"T": "AAPL", "v": 5000, "c": 149},
+                        {"T": "LOWV", "v": 800, "c": 11},
+                    ]
+                }
+            ),
+        ]
+    )
 
-    def fake_get(url: str, *args, **kwargs):
-        urls.append(url)
-        if "wikipedia" in url:
-            return FakeResponse(html)
-        raise AssertionError(f"Unexpected URL requested: {url}")
+    def fake_get(*args, **kwargs):
+        return next(responses)
 
     monkeypatch.setattr("algotrade.experiments.vcp.requests.get", fake_get)
 
-    symbols, warnings = _scrape_nasdaq_technology_symbols()
+    class DummySettings:
+        @staticmethod
+        def require_polygon_api_key() -> str:
+            return "mock"
 
-    assert urls == ["https://en.wikipedia.org/wiki/NASDAQ-100"]
-    assert symbols == ["AAPL", "MSFT"]
-    assert warnings == [
-        "Scraped technology symbols from Wikipedia NASDAQ-100."]
+    symbols, warnings = _fetch_polygon_liquid_symbols(
+        DummySettings(),
+        min_dollar_volume=1_500_000.0,
+        lookback_days=2,
+    )
+
+    assert symbols == ["AAPL"]
+    assert any("Identified" in message for message in warnings)
 
 
-def test_load_technology_universe_prefers_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_fetch_polygon_liquid_symbols_handles_unauthorized(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummySettings:
+        @staticmethod
+        def require_polygon_api_key() -> str:
+            return "mock"
+
+    class UnauthorizedResponse:
+        status_code = 401
+
+        @staticmethod
+        def json() -> dict:
+            return {"error": "Invalid API Key"}
+
+    monkeypatch.setattr(
+        "algotrade.experiments.vcp.requests.get",
+        lambda *args, **kwargs: UnauthorizedResponse(),
+    )
+
+    symbols, warnings = _fetch_polygon_liquid_symbols(
+        DummySettings(),
+        min_dollar_volume=1_500_000.0,
+        lookback_days=1,
+    )
+
+    assert symbols == []
+    assert any("unauthorized" in message.lower() for message in warnings)
+    assert any("POLYGON_API_KEY" in message for message in warnings)
+
+
+def test_load_liquid_universe_prefers_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     settings = _make_settings(tmp_path)
 
-    cache_path = settings.data_paths.cache / _TECH_UNIVERSE_CACHE
+    cache_path = settings.data_paths.cache / _LIQUID_UNIVERSE_CACHE
     cache_payload = {
-        "symbols": ["NVDA", "TSLA"],
-        "source": "web",
-        "cached_at": "2024-02-20T00:00:00Z",
+        "symbols": ["AAPL", "MSFT"],
+        "source": "test",
+        "cached_at": "2025-02-01T00:00:00Z",
     }
     cache_path.write_text(json.dumps(cache_payload), encoding="utf-8")
 
-    def _should_not_fetch(_settings):  # pragma: no cover - safety
-        raise AssertionError(
-            "Polygon fetch should not be invoked when cache is warm")
+    def _should_not_fetch(*args, **kwargs):  # pragma: no cover - safety
+        raise AssertionError("Fetch should not be called when cache is warm")
 
     monkeypatch.setattr(
-        "algotrade.experiments.vcp._fetch_polygon_technology_symbols",
-        _should_not_fetch,
-    )
-    monkeypatch.setattr(
-        "algotrade.experiments.vcp._scrape_nasdaq_technology_symbols",
+        "algotrade.experiments.vcp._fetch_polygon_liquid_symbols",
         _should_not_fetch,
     )
 
-    symbols, warnings = _load_technology_universe(settings)
+    symbols, warnings = _load_liquid_universe(settings)
+
+    assert symbols == ["AAPL", "MSFT"]
+    assert warnings == []
+
+
+def test_load_liquid_universe_force_refresh_falls_back_to_cache(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = _make_settings(tmp_path)
+
+    cache_path = settings.data_paths.cache / _LIQUID_UNIVERSE_CACHE
+    cache_payload = {
+        "symbols": ["NVDA", "TSLA"],
+        "source": "test",
+        "cached_at": "2025-02-01T00:00:00Z",
+    }
+    cache_path.write_text(json.dumps(cache_payload), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "algotrade.experiments.vcp._fetch_polygon_liquid_symbols",
+        lambda *args, **kwargs: ([], ["API unavailable"]),
+    )
+
+    symbols, warnings = _load_liquid_universe(settings, force_refresh=True)
 
     assert symbols == ["NVDA", "TSLA"]
-    assert warnings == []
+    assert "API unavailable" in warnings

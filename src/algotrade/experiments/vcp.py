@@ -6,13 +6,14 @@ import json
 import math
 import os
 import random
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import numpy as np
 import pandas as pd
 import requests
 
@@ -28,7 +29,9 @@ from .mean_reversion import ExperimentSplit, HoldRange, ParameterRange
 from .metrics import compute_backtest_metrics
 
 MAX_PARAMETER_COMBINATIONS = 10_000
-_TECH_UNIVERSE_CACHE = "nasdaq_technology_universe.json"
+_LIQUID_UNIVERSE_CACHE = "us_liquid_universe.json"
+DEFAULT_MIN_DOLLAR_VOLUME = 1_500_000.0
+DEFAULT_LIQUID_LOOKBACK_DAYS = 21
 
 _SCAN_TIMEFRAME_PRESETS: Dict[str, Dict[str, float | int | None]] = {
     "short": {
@@ -89,6 +92,15 @@ _SCAN_TIMEFRAME_PRESETS: Dict[str, Dict[str, float | int | None]] = {
         "cash_reserve_pct": 0.1,
     },
 }
+
+VCP_SCAN_CRITERIA_LABELS: Dict[str, str] = {
+    "flag_vcp": "Flag/VCP",
+    "minervini": "Minervini Criteria",
+    "qullamagie": "Qullamagie Criteria",
+}
+VCP_SCAN_CRITERIA_ORDER: Tuple[str, ...] = tuple(
+    VCP_SCAN_CRITERIA_LABELS.keys())
+DEFAULT_VCP_SCAN_CRITERIA: Tuple[str, ...] = VCP_SCAN_CRITERIA_ORDER
 
 
 @dataclass(slots=True)
@@ -322,24 +334,32 @@ def default_vcp_spec() -> VCPParameterSpec:
 
 
 @dataclass(slots=True)
+class VCPScanParameters:
+    rule_set: str = "Flag/VCP + Minervini + Qullamagie"
+    criteria: Tuple[str, ...] = field(
+        default_factory=lambda: DEFAULT_VCP_SCAN_CRITERIA
+    )
+
+
+@dataclass(slots=True)
 class VCPScanCandidate:
     symbol: str
     close_price: float
-    entry_price: float
-    stop_price: float
-    target_price: float
-    risk_per_share: float
-    resistance: float
-    base_low: float
-    breakout_timestamp: datetime
-    reward_to_risk: float
-    volume: float
+    monthly_dollar_volume: float
+    rs_percentile: float | None
+    qullamagie_score: float
+    flag_vcp_pass: bool
+    weekly_contraction: bool
+    monthly_contraction: bool
+    minervini_pass: bool
+    qullamagie_pass: bool
+    analysis_timestamp: datetime
 
 
 @dataclass(slots=True)
 class VCPScanSummary:
     timeframe: str
-    parameters: VCPParameters
+    parameters: VCPScanParameters
     symbols_scanned: int
     candidates: List[VCPScanCandidate]
     warnings: List[str]
@@ -796,7 +816,7 @@ def _resolve_scan_universe(
     return sorted(available), [], warnings
 
 
-def _load_cached_technology_symbols(cache_path: Path) -> tuple[list[str], list[str]]:
+def _load_cached_universe_symbols(cache_path: Path) -> tuple[list[str], list[str]]:
     if not cache_path.exists():
         return [], []
     try:
@@ -809,10 +829,15 @@ def _load_cached_technology_symbols(cache_path: Path) -> tuple[list[str], list[s
                       for symbol in symbols if str(symbol).strip()]
         return sorted(set(normalized)), []
     except Exception as exc:  # pragma: no cover - cache parse errors
-        return [], [f"Failed to read cached technology universe: {exc}"]
+        return [], [f"Failed to read cached liquid universe: {exc}"]
 
 
-def _fetch_polygon_technology_symbols(settings: AppSettings) -> tuple[list[str], list[str]]:
+def _fetch_polygon_liquid_symbols(
+    settings: AppSettings,
+    *,
+    min_dollar_volume: float | None = None,
+    lookback_days: int | None = None,
+) -> tuple[list[str], list[str]]:
     try:
         api_key = settings.require_polygon_api_key()
     except RuntimeError as exc:
@@ -820,227 +845,201 @@ def _fetch_polygon_technology_symbols(settings: AppSettings) -> tuple[list[str],
 
     base_url = os.getenv("POLYGON_BASE_URL",
                          "https://api.polygon.io").rstrip("/")
-    params = {
-        "market": "stocks",
-        "primary_exchange": "XNAS",
-        "active": "true",
-        "sector": "Technology",
-        "limit": 1000,
-        "order": "asc",
-        "sort": "ticker",
-    }
-    url = f"{base_url}/v3/reference/tickers"
-    collected: set[str] = set()
-    warnings: list[str] = []
+    threshold = (
+        float(min_dollar_volume)
+        if min_dollar_volume is not None
+        else float(os.getenv("VCP_MIN_DOLLAR_VOLUME", DEFAULT_MIN_DOLLAR_VOLUME))
+    )
+    lookback = (
+        int(lookback_days)
+        if lookback_days is not None
+        else int(os.getenv("VCP_LIQUID_LOOKBACK_DAYS", DEFAULT_LIQUID_LOOKBACK_DAYS))
+    )
+    lookback = max(lookback, 1)
 
-    while url:
+    aggregated_volume: Dict[str, float] = defaultdict(float)
+    latest_close: Dict[str, float] = {}
+
+    warnings: list[str] = []
+    processed_days = 0
+    attempts = 0
+    max_attempts = lookback + 30
+    today = date.today()
+
+    while processed_days < lookback and attempts < max_attempts:
+        target_date = today - timedelta(days=attempts)
+        attempts += 1
+        day_str = target_date.strftime("%Y-%m-%d")
+
         try:
             response = requests.get(
-                url,
-                params=params if "?" not in url else None,
+                f"{base_url}/v2/aggs/grouped/locale/us/market/stocks/{day_str}",
+                params={"adjusted": "true", "apiKey": api_key},
                 timeout=30,
             )
-            response.raise_for_status()
-            payload = response.json()
         except requests.RequestException as exc:
             warnings.append(
-                f"Failed to fetch technology universe from Polygon: {exc}")
-            return sorted(collected), warnings
-        except ValueError as exc:  # JSON decode error
+                f"Failed to fetch grouped aggregates for {day_str}: {exc}"
+            )
+            continue
+
+        if response.status_code == 404:
+            continue
+        if response.status_code == 429:
             warnings.append(
-                f"Invalid response decoding technology universe: {exc}")
-            return sorted(collected), warnings
+                "Polygon API rate limit reached while computing liquid universe."
+            )
+            break
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            warnings.append(
+                f"Invalid JSON while fetching grouped aggregates for {day_str}: {exc}"
+            )
+            continue
+
+        if response.status_code in {401, 403}:
+            error_details = ""
+            if isinstance(payload, dict):
+                for key in ("error", "message", "detail", "details"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value.strip():
+                        error_details = value.strip()
+                        break
+            if response.status_code == 401:
+                base_message = "Polygon API request unauthorized while computing liquid universe."
+                guidance = "Verify the POLYGON_API_KEY environment variable."
+            else:
+                base_message = "Polygon API request forbidden while computing liquid universe."
+                guidance = "Confirm your account has access to grouped aggregates."
+            full_message = base_message
+            if error_details:
+                full_message = f"{base_message} ({error_details})"
+            warnings.append(f"{full_message} {guidance}".strip())
+            break
+
+        if response.status_code >= 400:
+            error_details = ""
+            if isinstance(payload, dict):
+                for key in ("error", "message", "detail", "details"):
+                    value = payload.get(key)
+                    if isinstance(value, str) and value.strip():
+                        error_details = value.strip()
+                        break
+            suffix = f": {error_details}" if error_details else ""
+            warnings.append(
+                f"Error response fetching grouped aggregates for {day_str}: HTTP {response.status_code}{suffix}"
+            )
+            continue
 
         results = payload.get("results") or []
+        if not results:
+            continue
+
+        processed_days += 1
         for item in results:
-            ticker = item.get("ticker")
-            if isinstance(ticker, str) and ticker.strip():
-                collected.add(ticker.strip().upper())
+            ticker = item.get("T")
+            volume = item.get("v")
+            close = item.get("c")
+            if close in (None, 0):
+                close = item.get("vw")
 
-        next_url = payload.get("next_url")
-        if next_url:
-            url = next_url
-            params = None
-        else:
-            url = None
-
-    return sorted(collected), warnings
-
-
-def _scrape_nasdaq_technology_symbols() -> tuple[list[str], list[str]]:
-    """Scrape public sources for NASDAQ technology tickers as a fallback."""
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-
-    def _normalize_columns(table: pd.DataFrame) -> list[str]:
-        normalized: list[str] = []
-        for column in table.columns:
-            if isinstance(column, tuple):
-                parts = [str(part).strip()
-                         for part in column if str(part).strip()]
-                normalized.append(" ".join(parts))
-            else:
-                normalized.append(str(column).strip())
-        return normalized
-
-    def _scrape_wikipedia() -> tuple[list[str], list[str]]:
-        url = "https://en.wikipedia.org/wiki/NASDAQ-100"
-        try:
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            return [], [f"Failed to download NASDAQ-100 listing from Wikipedia: {exc}"]
-
-        try:
-            tables = pd.read_html(StringIO(response.text))
-        except ValueError as exc:
-            return [], [f"Unable to parse NASDAQ-100 listing from Wikipedia: {exc}"]
-
-        extracted: set[str] = set()
-        for table in tables:
-            if table.empty:
-                continue
-            table.columns = _normalize_columns(table)
-            if "Ticker" not in table.columns:
+            if not ticker or volume in (None, 0):
                 continue
 
-            if "GICS Sector" in table.columns:
-                sectors = table["GICS Sector"].astype(str).str.strip()
-                mask = sectors.str.contains(
-                    "Information Technology", case=False, na=False)
-            elif "Sector" in table.columns:
-                sectors = table["Sector"].astype(str).str.strip()
-                mask = sectors.str.contains("Technology", case=False, na=False)
-            else:
+            try:
+                volume_value = float(volume)
+            except (TypeError, ValueError):
                 continue
 
-            if not mask.any():
+            ticker_text = str(ticker).strip().upper()
+            if not ticker_text:
                 continue
 
-            tickers = table.loc[mask, "Ticker"].dropna().astype(str)
-            for value in tickers:
-                token = value.strip().upper()
-                cleaned = token.replace(".", "").replace("-", "")
-                if token and cleaned and cleaned.isalnum():
-                    extracted.add(token)
+            aggregated_volume[ticker_text] += volume_value
+            if close not in (None, 0):
+                try:
+                    price_value = float(close)
+                except (TypeError, ValueError):
+                    price_value = None
+                if price_value is not None and ticker_text not in latest_close:
+                    latest_close[ticker_text] = price_value
 
-        if not extracted:
-            return [], ["Wikipedia NASDAQ-100 listing did not expose technology tickers."]
+    symbols: list[str] = []
+    for ticker, total_volume in aggregated_volume.items():
+        close_price = latest_close.get(ticker)
+        if close_price is None:
+            continue
+        if close_price * total_volume >= threshold:
+            symbols.append(ticker)
 
-        return sorted(extracted), []
+    symbols.sort()
 
-    def _scrape_stockmonitor() -> tuple[list[str], list[str]]:
-        url = "https://www.stockmonitor.com/sector/technology/"
-        try:
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            return [], [f"Failed to download technology listing from StockMonitor: {exc}"]
+    if symbols:
+        warnings.append(
+            f"Identified {len(symbols)} US equities meeting "
+            f"${threshold:,.0f}+ dollar volume over {processed_days} trading day"
+            f"{'' if processed_days == 1 else 's'}."
+        )
+    elif processed_days == 0:
+        warnings.append(
+            "No grouped aggregate data retrieved while computing US liquid universe."
+        )
+    else:
+        warnings.append(
+            f"No US equities satisfied the ${threshold:,.0f}+ dollar volume filter "
+            f"over {processed_days} trading day"
+            f"{'' if processed_days == 1 else 's'}."
+        )
 
-        try:
-            tables = pd.read_html(StringIO(response.text))
-        except ValueError as exc:
-            return [], [f"Unable to parse technology listing from StockMonitor: {exc}"]
-
-        extracted: set[str] = set()
-        for table in tables:
-            if table.empty:
-                continue
-            table.columns = _normalize_columns(table)
-            for column in ("Symbol", "Ticker", "Ticker Symbol", "Code"):
-                if column in table.columns:
-                    symbols = table[column].dropna().astype(str)
-                    for value in symbols:
-                        token = value.strip().upper()
-                        cleaned = token.replace(".", "").replace("-", "")
-                        if token and cleaned and cleaned.isalnum():
-                            extracted.add(token)
-                    break
-
-        if not extracted:
-            return [], ["StockMonitor technology listing did not expose recognizable symbol columns."]
-
-        return sorted(extracted), []
-
-    warnings: list[str] = []
-    sources: list[tuple[str, Callable[[], tuple[list[str], list[str]]]]] = [
-        ("Wikipedia NASDAQ-100", _scrape_wikipedia),
-        ("StockMonitor Technology", _scrape_stockmonitor),
-    ]
-
-    for source_name, scraper in sources:
-        symbols, source_warnings = scraper()
-        warnings.extend(source_warnings)
-        if symbols:
-            warnings.append(f"Scraped technology symbols from {source_name}.")
-            return symbols, warnings
-
-    return [], warnings
+    return symbols, warnings
 
 
-def _load_technology_universe(
+def _load_liquid_universe(
     settings: AppSettings,
     *,
     force_refresh: bool = False,
+    min_dollar_volume: float | None = None,
+    lookback_days: int | None = None,
 ) -> tuple[list[str], list[str]]:
-    cache_path = settings.data_paths.cache / _TECH_UNIVERSE_CACHE
+    cache_path = settings.data_paths.cache / _LIQUID_UNIVERSE_CACHE
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if not force_refresh:
-        symbols, warnings = _load_cached_technology_symbols(cache_path)
-        if symbols:
-            return symbols, warnings
-    else:
-        symbols, warnings = [], []
+    warnings: list[str] = []
 
-    fetched, fetch_warnings = _fetch_polygon_technology_symbols(settings)
+    if not force_refresh:
+        cached_symbols, cache_warnings = _load_cached_universe_symbols(
+            cache_path)
+        warnings.extend(cache_warnings)
+        if cached_symbols:
+            return cached_symbols, warnings
+
+    fetched_symbols, fetch_warnings = _fetch_polygon_liquid_symbols(
+        settings,
+        min_dollar_volume=min_dollar_volume,
+        lookback_days=lookback_days,
+    )
     warnings.extend(fetch_warnings)
-    if fetched:
+    if fetched_symbols:
         try:
             with cache_path.open("w", encoding="utf-8") as handle:
                 json.dump(
                     {
-                        "symbols": fetched,
-                        "source": "polygon",
+                        "symbols": fetched_symbols,
+                        "source": "polygon_grouped",
                         "cached_at": datetime.now(timezone.utc).isoformat(),
                     },
                     handle,
                 )
         except Exception as exc:  # pragma: no cover - cache write errors
-            warnings.append(f"Failed to cache technology universe: {exc}")
-        return fetched, warnings
+            warnings.append(f"Failed to cache liquid universe: {exc}")
+        return fetched_symbols, warnings
 
-    scraped, scrape_warnings = _scrape_nasdaq_technology_symbols()
-    warnings.extend(scrape_warnings)
-    if scraped:
-        try:
-            with cache_path.open("w", encoding="utf-8") as handle:
-                json.dump(
-                    {
-                        "symbols": scraped,
-                        "source": "web",
-                        "cached_at": datetime.now(timezone.utc).isoformat(),
-                    },
-                    handle,
-                )
-        except Exception as exc:  # pragma: no cover - cache write errors
-            warnings.append(
-                f"Failed to cache scraped technology universe: {exc}")
-        return scraped, warnings
-
-    if not force_refresh:
-        return [], warnings
-
-    cached_symbols, cache_warnings = _load_cached_technology_symbols(
+    fallback_symbols, cache_warnings = _load_cached_universe_symbols(
         cache_path)
     warnings.extend(cache_warnings)
-    return cached_symbols, warnings
+    return fallback_symbols, warnings
 
 
 def default_vcp_scan_universe(
@@ -1048,22 +1047,25 @@ def default_vcp_scan_universe(
     *,
     bar_size: str = "1d",
 ) -> tuple[List[str], List[str], List[str]]:
-    """Resolve the default NASDAQ technology-sector universe for VCP scanning."""
+    """Resolve the default US liquid universe for VCP scanning."""
 
     settings = AppSettings()
-    tech_symbols, tech_warnings = _load_technology_universe(settings)
+    liquid_symbols, liquid_warnings = _load_liquid_universe(settings)
     store = ParquetBarStore(store_path)
 
-    universe_symbols: Sequence[str] | None = tech_symbols if tech_symbols else None
+    universe_symbols: Sequence[str] | None = (
+        liquid_symbols if liquid_symbols else None
+    )
     selected, missing, warnings = _resolve_scan_universe(
-        store, bar_size, universe_symbols)
+        store, bar_size, universe_symbols
+    )
 
-    all_warnings = list(tech_warnings)
+    all_warnings = list(liquid_warnings)
     all_warnings.extend(warnings)
 
     if universe_symbols and missing:
         all_warnings.append(
-            f"{len(missing)} technology-sector symbols missing cached bars; consider fetching latest data."
+            f"{len(missing)} liquid-universe symbols missing cached bars; consider fetching latest data."
         )
 
     if not selected and universe_symbols:
@@ -1071,7 +1073,7 @@ def default_vcp_scan_universe(
             store, bar_size, symbols=None
         )
         all_warnings.append(
-            "Technology-sector universe unavailable in cache; falling back to all cached symbols."
+            "Liquid-universe set unavailable in cache; falling back to all cached symbols."
         )
         all_warnings.extend(fallback_warnings)
         selected = fallback_selected
@@ -1080,22 +1082,27 @@ def default_vcp_scan_universe(
     return selected, missing, all_warnings
 
 
-def technology_universe_symbols(
+def liquid_universe_symbols(
     *,
     force_refresh: bool = False,
+    min_dollar_volume: float | None = None,
+    lookback_days: int | None = None,
 ) -> tuple[List[str], List[str]]:
-    """Return the NASDAQ technology universe symbols with optional refresh."""
+    """Return the US liquid universe symbols with optional refresh."""
 
     settings = AppSettings()
-    symbols, warnings = _load_technology_universe(
-        settings, force_refresh=force_refresh)
-    return symbols, warnings
+    return _load_liquid_universe(
+        settings,
+        force_refresh=force_refresh,
+        min_dollar_volume=min_dollar_volume,
+        lookback_days=lookback_days,
+    )
 
 
-def refresh_technology_universe() -> tuple[List[str], List[str]]:
-    """Force refresh the NASDAQ technology universe from Polygon."""
+def refresh_liquid_universe() -> tuple[List[str], List[str]]:
+    """Force refresh the US liquid universe from Polygon grouped aggregates."""
 
-    return technology_universe_symbols(force_refresh=True)
+    return liquid_universe_symbols(force_refresh=True)
 
 
 def _build_vcp_scan_strategy(symbol: str, parameters: VCPParameters) -> VCPStrategy:
@@ -1124,16 +1131,55 @@ def _build_vcp_scan_strategy(symbol: str, parameters: VCPParameters) -> VCPStrat
     return VCPStrategy(config)
 
 
+def _normalize_scan_criteria(criteria: Sequence[str] | None) -> Tuple[str, ...]:
+    if not criteria:
+        return DEFAULT_VCP_SCAN_CRITERIA
+    requested: list[str] = []
+    for item in criteria:
+        value = getattr(item, "value", item)
+        if value is None:
+            continue
+        key = str(value).strip().lower()
+        if key in VCP_SCAN_CRITERIA_LABELS:
+            requested.append(key)
+    normalized: list[str] = []
+    for key in VCP_SCAN_CRITERIA_ORDER:
+        if key in requested and key not in normalized:
+            normalized.append(key)
+    if not normalized:
+        return DEFAULT_VCP_SCAN_CRITERIA
+    return tuple(normalized)
+
+
+def _describe_scan_rule_set(criteria: Sequence[str]) -> str:
+    if not criteria:
+        return "No criteria"
+    labels = [VCP_SCAN_CRITERIA_LABELS.get(
+        key, key.title()) for key in criteria]
+    return " + ".join(labels)
+
+
+def _meets_selected_criteria(metrics: Mapping[str, Any], criteria: Sequence[str]) -> bool:
+    for key in criteria:
+        if key == "flag_vcp" and not metrics.get("flag_vcp_pass", False):
+            return False
+        if key == "minervini" and not metrics.get("minervini_pass", False):
+            return False
+        if key == "qullamagie" and not metrics.get("qullamagie_pass", False):
+            return False
+    return True
+
+
 def scan_vcp_candidates(
     store_path: Path,
     *,
     timeframe: str,
-    overrides: Dict[str, float | int | None] | None = None,
     bar_size: str = "1d",
     symbols: Sequence[str] | None = None,
     max_candidates: int = 50,
+    criteria: Sequence[str] | None = None,
 ) -> VCPScanSummary:
-    parameters = _resolve_scan_parameters(timeframe, overrides)
+    selected_criteria = _normalize_scan_criteria(criteria)
     store = ParquetBarStore(store_path)
     if symbols:
         selected_symbols, missing_symbols, universe_warnings = _resolve_scan_universe(
@@ -1149,75 +1195,71 @@ def scan_vcp_candidates(
             "None of the requested or default universe symbols are available in the local store."
         )
 
-    candidates: List[VCPScanCandidate] = []
     warnings: List[str] = list(universe_warnings)
     analysis_timestamp: datetime | None = None
 
+    spy_monthly: Optional[pd.DataFrame] = None
+    try:
+        spy_frame = store.load("SPY", bar_size)
+        spy_monthly = _resample_ohlcv(spy_frame, "ME")
+    except FileNotFoundError:
+        warnings.append(
+            "SPY data unavailable; relative strength ranks cannot be computed.")
+
+    metrics_bundle: List[Dict[str, Any]] = []
     for symbol in selected_symbols:
         try:
             frame = store.load(symbol, bar_size)
         except FileNotFoundError:
             warnings.append(f"Missing historical data for {symbol}.")
             continue
-        if frame.empty:
-            continue
 
-        frame = frame.sort_values("timestamp")
-        closes = [float(value) for value in frame["close"].tolist()]
-        highs = [float(value) for value in frame["high"].tolist()]
-        lows = [float(value) for value in frame["low"].tolist()]
-        volumes = [float(value) for value in frame["volume"].tolist()]
-
-        if len(closes) < max(parameters.base_lookback_days,
-                             parameters.trend_ma_period) + 5:
-            continue
-
-        strategy = _build_vcp_scan_strategy(symbol, parameters)
-        strategy.close_history[symbol] = deque(
-            closes, maxlen=strategy.history_window)
-        strategy.high_history[symbol] = deque(
-            highs, maxlen=strategy.history_window)
-        strategy.low_history[symbol] = deque(
-            lows, maxlen=strategy.history_window)
-        strategy.volume_history[symbol] = deque(
-            volumes, maxlen=strategy.history_window)
-
-        price = closes[-1]
-        volume = volumes[-1]
-        detection = strategy._detect_breakout(symbol, price, volume)
-        if detection is None:
-            continue
-
-        entry_price, stop_price, target_price, resistance, base_low, risk = detection
-        if risk <= 0:
-            continue
-
-        ts_value = pd.to_datetime(frame["timestamp"].iloc[-1], utc=True)
-        breakout_ts = ts_value.to_pydatetime()
-        analysis_timestamp = (
-            breakout_ts
-            if analysis_timestamp is None or breakout_ts > analysis_timestamp
-            else analysis_timestamp
+        symbol_metrics = _evaluate_flag_vcp_minervini_qullamagie(
+            symbol=symbol,
+            frame=frame,
+            spy_monthly=spy_monthly,
         )
+        if symbol_metrics is None:
+            continue
+        analysis_timestamp = _max_timestamp(
+            analysis_timestamp, symbol_metrics["analysis_timestamp"])
+        metrics_bundle.append(symbol_metrics)
 
-        reward_to_risk = (target_price - entry_price) / risk
-        candidates.append(
-            VCPScanCandidate(
-                symbol=symbol,
-                close_price=price,
-                entry_price=entry_price,
-                stop_price=stop_price,
-                target_price=target_price,
-                risk_per_share=risk,
-                resistance=resistance,
-                base_low=base_low,
-                breakout_timestamp=breakout_ts,
-                reward_to_risk=reward_to_risk,
-                volume=volume,
-            )
+    rs_values = [metrics["rs_value"]
+                 for metrics in metrics_bundle if metrics["rs_value"] is not None]
+    sorted_rs = np.sort(rs_values) if rs_values else np.array([])
+
+    def _percentile(value: float | None) -> Optional[float]:
+        if value is None or not len(sorted_rs):
+            return None
+        rank = np.searchsorted(sorted_rs, value, side="right")
+        return (rank / len(sorted_rs)) * 100.0
+
+    candidates: List[VCPScanCandidate] = []
+    for metrics in metrics_bundle:
+        rs_percentile = _percentile(metrics["rs_value"])
+        metrics["rs_percentile"] = rs_percentile
+        if not _meets_selected_criteria(metrics, selected_criteria):
+            continue
+        if rs_percentile is None or rs_percentile < 75.0:
+            continue
+        candidate = VCPScanCandidate(
+            symbol=metrics["symbol"],
+            close_price=metrics["close"],
+            monthly_dollar_volume=metrics["monthly_dollar_volume"],
+            rs_percentile=rs_percentile,
+            qullamagie_score=metrics["qullamagie_score"],
+            flag_vcp_pass=metrics["flag_vcp_pass"],
+            weekly_contraction=metrics["weekly_contraction"],
+            monthly_contraction=metrics["monthly_contraction"],
+            minervini_pass=metrics["minervini_pass"],
+            qullamagie_pass=metrics["qullamagie_pass"],
+            analysis_timestamp=metrics["analysis_timestamp"],
         )
+        candidates.append(candidate)
 
-    candidates.sort(key=lambda item: item.reward_to_risk, reverse=True)
+    candidates.sort(key=lambda item: (
+        (item.rs_percentile or 0.0), item.qullamagie_score), reverse=True)
     if max_candidates > 0:
         candidates = candidates[:max_candidates]
 
@@ -1225,6 +1267,11 @@ def scan_vcp_candidates(
         warnings.append(
             "Excluded missing symbols: " + ", ".join(sorted(missing_symbols))
         )
+
+    parameters = VCPScanParameters(
+        rule_set=_describe_scan_rule_set(selected_criteria),
+        criteria=tuple(selected_criteria),
+    )
 
     return VCPScanSummary(
         timeframe=timeframe,
@@ -1234,6 +1281,177 @@ def scan_vcp_candidates(
         warnings=warnings,
         analysis_timestamp=analysis_timestamp,
     )
+
+
+def _max_timestamp(existing: datetime | None, candidate: datetime | None) -> datetime | None:
+    if candidate is None:
+        return existing
+    if existing is None or candidate > existing:
+        return candidate
+    return existing
+
+
+def _resample_ohlcv(frame: pd.DataFrame, rule: str) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    indexed = frame.sort_values("timestamp")
+    timestamps = pd.DatetimeIndex(indexed["timestamp"])
+    if timestamps.tz is None:
+        timestamps = timestamps.tz_localize("UTC")
+    else:
+        timestamps = timestamps.tz_convert("UTC")
+    indexed = indexed.set_index(timestamps)
+    aggregated = indexed.resample(rule).agg(
+        {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+    )
+    aggregated = aggregated.dropna(how="any")
+    return aggregated
+
+
+def _evaluate_flag_vcp_minervini_qullamagie(
+    *,
+    symbol: str,
+    frame: pd.DataFrame,
+    spy_monthly: Optional[pd.DataFrame],
+) -> Optional[Dict[str, Any]]:
+    if frame.empty:
+        return None
+
+    ordered = frame.sort_values("timestamp").reset_index(drop=True)
+    close_series = ordered["close"].astype(float)
+    high_series = ordered["high"].astype(float)
+    low_series = ordered["low"].astype(float)
+    if len(close_series) < 252:
+        return None
+
+    sma10_series = close_series.rolling(10)
+    sma20_series = close_series.rolling(20)
+    sma50_series = close_series.rolling(50)
+    sma150_series = close_series.rolling(150)
+    sma200_series = close_series.rolling(200)
+    ema20_series = close_series.ewm(span=20, adjust=False)
+
+    sma10 = sma10_series.mean().iloc[-1]
+    sma20 = sma20_series.mean().iloc[-1]
+    sma50 = sma50_series.mean().iloc[-1]
+    sma150 = sma150_series.mean().iloc[-1]
+    sma200 = sma200_series.mean().iloc[-1]
+    sma200_prev = sma200_series.mean().shift(25).iloc[-1]
+    ema20 = ema20_series.mean().iloc[-1]
+
+    if any(np.isnan(value) for value in [sma10, sma20, sma50, sma150, sma200, sma200_prev, ema20]):
+        return None
+
+    close = float(close_series.iloc[-1])
+
+    flag_conditions = (
+        sma10 > sma20
+        and close > sma20
+        and close <= ema20 * 1.05
+    )
+
+    weekly = _resample_ohlcv(ordered, "W-FRI")
+    if len(weekly) < 5:
+        return None
+    weekly_ranges = (weekly["high"] - weekly["low"]).astype(float)
+    weekly_contraction = bool(
+        (weekly_ranges.iloc[-5:-1] >= weekly_ranges.iloc[-1]).all())
+
+    monthly = _resample_ohlcv(ordered, "ME")
+    if len(monthly) < 3:
+        return None
+    monthly_ranges = (monthly["high"] - monthly["low"]).astype(float)
+    monthly_contraction = bool(
+        (monthly_ranges.iloc[-3:-1] >= monthly_ranges.iloc[-1]).all())
+
+    monthly_dollar_volume = float(
+        monthly["close"].iloc[-1] * monthly["volume"].iloc[-1])
+    dollar_volume_pass = monthly_dollar_volume > 1_500_000
+
+    flag_vcp_pass = (
+        flag_conditions
+        and weekly_contraction
+        and monthly_contraction
+        and dollar_volume_pass
+    )
+
+    min_low_252 = float(low_series.rolling(252).min().iloc[-1])
+    max_high_252 = float(high_series.rolling(252).max().iloc[-1])
+
+    minervini_pass = (
+        close > sma200
+        and close > sma150
+        and sma150 > sma200
+        and sma200 > sma200_prev
+        and sma50 > sma200
+        and sma50 > sma150
+        and close > sma50
+        and close > 1.3 * min_low_252
+        and close > 0.75 * max_high_252
+    )
+
+    qullamagie_score = _compute_qullamagie_score(high_series, low_series)
+    if qullamagie_score is None:
+        return None
+    qullamagie_pass = qullamagie_score > 3.5
+
+    rs_value = _compute_relative_strength(monthly, spy_monthly)
+
+    analysis_timestamp = pd.to_datetime(
+        ordered["timestamp"].iloc[-1]).to_pydatetime()
+
+    return {
+        "symbol": symbol,
+        "close": close,
+        "monthly_dollar_volume": monthly_dollar_volume,
+        "weekly_contraction": weekly_contraction,
+        "monthly_contraction": monthly_contraction,
+        "flag_vcp_pass": flag_vcp_pass,
+        "minervini_pass": minervini_pass,
+        "qullamagie_score": float(qullamagie_score),
+        "qullamagie_pass": qullamagie_pass,
+        "analysis_timestamp": analysis_timestamp,
+        "rs_value": rs_value,
+    }
+
+
+def _compute_qullamagie_score(high_series: pd.Series, low_series: pd.Series) -> Optional[float]:
+    if len(high_series) < 20 or len(low_series) < 20:
+        return None
+    recent_high = high_series.astype(float).iloc[-20:]
+    recent_low = low_series.astype(float).iloc[-20:]
+    if (recent_low <= 0).any():
+        return None
+    ratios = recent_high / recent_low
+    score = 100.0 * (ratios.mean() - 1.0)
+    if not np.isfinite(score):
+        return None
+    return float(score)
+
+
+def _compute_relative_strength(symbol_monthly: pd.DataFrame, spy_monthly: Optional[pd.DataFrame]) -> Optional[float]:
+    if spy_monthly is None or symbol_monthly.empty or spy_monthly.empty:
+        return None
+    symbol_close = symbol_monthly["close"].astype(float)
+    spy_close = spy_monthly["close"].astype(float)
+    joined = symbol_close.to_frame("symbol_close").join(
+        spy_close.to_frame("spy_close"), how="inner"
+    )
+    if len(joined) < 13:
+        return None
+    symbol_return = joined["symbol_close"].iloc[-1] / \
+        joined["symbol_close"].iloc[-13] - 1.0
+    spy_return = joined["spy_close"].iloc[-1] / \
+        joined["spy_close"].iloc[-13] - 1.0
+    if not np.isfinite(symbol_return) or not np.isfinite(spy_return):
+        return None
+    return float(symbol_return - spy_return)
 
 
 def _scan_vcp_symbol_history(
@@ -1755,10 +1973,10 @@ __all__ = [
     "VCPPatternHistorySummary",
     "default_vcp_spec",
     "default_vcp_scan_universe",
-    "refresh_technology_universe",
+    "refresh_liquid_universe",
     "generate_vcp_parameter_grid",
     "optimize_vcp_parameters",
-    "technology_universe_symbols",
+    "liquid_universe_symbols",
     "scan_vcp_candidates",
     "scan_vcp_history",
     "run_vcp_experiment",
