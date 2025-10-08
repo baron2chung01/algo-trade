@@ -29,6 +29,7 @@ const elements = {
     breakoutSection: document.getElementById("breakout-params"),
     vcpSection: document.getElementById("vcp-params"),
     scanRunButton: document.getElementById("scan-run-button"),
+    scanExportButton: document.getElementById("scan-export-button"),
     scanTimeframe: document.getElementById("scan-timeframe"),
     scanMaxCandidates: document.getElementById("scan-max-candidates"),
     scanSymbolsInput: document.getElementById("scan-symbols"),
@@ -97,12 +98,13 @@ const vcpControls = {
     annealingSettings: document.getElementById("vcp-annealing-settings"),
 };
 
-const SCAN_TABLE_COLUMNS = 10;
-const DEFAULT_SCAN_CRITERIA = ["flag_vcp", "minervini", "qullamagie"];
+const SCAN_TABLE_COLUMNS = 11;
+const DEFAULT_SCAN_CRITERIA = ["liquidity", "uptrend_breakout", "higher_lows", "volume_contraction"];
 const SCAN_CRITERIA_LABELS = {
-    flag_vcp: "Flag/VCP",
-    minervini: "Minervini Criteria",
-    qullamagie: "Qullamagie Criteria",
+    liquidity: "Liquidity Filter",
+    uptrend_breakout: "Uptrend Nearing Breakout",
+    higher_lows: "Higher Lows",
+    volume_contraction: "Volume Contracting",
 };
 
 let latestData = null;
@@ -296,6 +298,13 @@ function initializeScanPage() {
     if (elements.scanRunButton && !elements.scanRunButton.dataset.originalLabel) {
         elements.scanRunButton.dataset.originalLabel = elements.scanRunButton.textContent?.trim() || "Run Scan";
     }
+    if (elements.scanExportButton && !elements.scanExportButton.dataset.originalLabel) {
+        elements.scanExportButton.dataset.originalLabel =
+            elements.scanExportButton.textContent?.trim() || "Export to IBKR CSV";
+    }
+    if (elements.scanExportButton) {
+        elements.scanExportButton.addEventListener("click", handleScanExport);
+    }
     elements.scanForm.addEventListener("submit", runScan);
     resetScanResults();
     setScanStatus("Choose a preset and run the scan to discover active VCP breakouts.", "info");
@@ -320,6 +329,7 @@ function resetScanResults() {
         elements.scanTableBody.innerHTML = `<tr><td colspan="${SCAN_TABLE_COLUMNS}" class="metric-empty">Run the scan to populate candidates.</td></tr>`;
     }
     renderScanWarnings([]);
+    updateScanExportAvailability(null);
 }
 
 function setScanStatus(message, level = "info") {
@@ -348,6 +358,7 @@ async function runScan(event) {
     }
 
     setScanStatus("Scanning for VCP breakouts...", "info");
+    updateScanExportAvailability(null);
 
     const payload = buildScanRequest();
 
@@ -1131,6 +1142,7 @@ function renderScanResults(result) {
     renderScanSummary(result);
     renderScanCandidates(result?.candidates);
     renderScanWarnings(result?.warnings);
+    updateScanExportAvailability(result);
     const candidateCount = Array.isArray(result?.candidates) ? result.candidates.length : 0;
     const symbolsScanned = Number.isFinite(result?.symbols_scanned) ? result.symbols_scanned : 0;
     const message = candidateCount
@@ -1188,22 +1200,34 @@ function renderScanCandidates(candidates) {
 
     const rows = candidates
         .map((candidate) => {
-            const dollarVolume = formatCurrency(candidate.monthly_dollar_volume);
+            const marketCap = candidate.market_cap === null || candidate.market_cap === undefined
+                ? "–"
+                : formatCurrency(candidate.market_cap);
+            const dollarVolume = candidate.monthly_dollar_volume === null || candidate.monthly_dollar_volume === undefined
+                ? "–"
+                : formatCurrency(candidate.monthly_dollar_volume);
             const rsPercentile = candidate.rs_percentile === null || candidate.rs_percentile === undefined
                 ? "–"
                 : formatNumber(candidate.rs_percentile, 1);
+            const dailyDistance = candidate.daily_breakout_distance_pct === null || candidate.daily_breakout_distance_pct === undefined
+                ? "–"
+                : formatPercent(candidate.daily_breakout_distance_pct, 2);
+            const weeklyDistance = candidate.weekly_breakout_distance_pct === null || candidate.weekly_breakout_distance_pct === undefined
+                ? "–"
+                : formatPercent(candidate.weekly_breakout_distance_pct, 2);
             return `
                 <tr>
                     <td>${candidate.symbol || ""}</td>
                     <td>${formatCurrency(candidate.close_price)}</td>
+                    <td>${marketCap}</td>
                     <td>${dollarVolume}</td>
                     <td>${rsPercentile}</td>
-                    <td>${candidate.flag_vcp_pass ? "Yes" : "No"}</td>
-                    <td>${candidate.weekly_contraction ? "Yes" : "No"}</td>
-                    <td>${candidate.monthly_contraction ? "Yes" : "No"}</td>
-                    <td>${candidate.minervini_pass ? "Yes" : "No"}</td>
-                    <td>${formatNumber(candidate.qullamagie_score, 2)}</td>
-                    <td>${candidate.qullamagie_pass ? "Yes" : "No"}</td>
+                    <td>${candidate.liquidity_pass ? "Yes" : "No"}</td>
+                    <td>${candidate.uptrend_breakout_pass ? "Yes" : "No"}</td>
+                    <td>${candidate.higher_lows_pass ? "Yes" : "No"}</td>
+                    <td>${candidate.volume_contraction_pass ? "Yes" : "No"}</td>
+                    <td>${dailyDistance}</td>
+                    <td>${weeklyDistance}</td>
                 </tr>
             `;
         })
@@ -1222,6 +1246,159 @@ function renderScanWarnings(warnings) {
     }
     elements.scanWarningsList.innerHTML = warnings.map((warning) => `<li>${warning}</li>`).join("");
     elements.scanWarningsGroup.hidden = false;
+}
+
+function updateScanExportAvailability(result) {
+    const button = elements.scanExportButton;
+    if (!button) {
+        return;
+    }
+    const symbols = collectCandidateSymbols(result?.candidates);
+    const hasCandidates = symbols.length > 0;
+    button.disabled = !hasCandidates;
+    button.dataset.symbolCount = hasCandidates ? String(symbols.length) : "";
+    if (!hasCandidates && button.dataset.originalLabel) {
+        button.textContent = button.dataset.originalLabel;
+    }
+}
+
+function collectCandidateSymbols(candidates) {
+    if (!Array.isArray(candidates)) {
+        return [];
+    }
+    const unique = new Set();
+    candidates.forEach((candidate) => {
+        const symbol = typeof candidate?.symbol === "string" ? candidate.symbol.trim().toUpperCase() : "";
+        if (symbol) {
+            unique.add(symbol);
+        }
+    });
+    return Array.from(unique);
+}
+
+function buildScanWatchlistName(result) {
+    const timeframeLabel = formatStrategyName(result?.timeframe) || "Scan";
+    return `VCP ${timeframeLabel} Candidates`;
+}
+
+function buildScanExportPayload(result) {
+    const symbols = collectCandidateSymbols(result?.candidates);
+    if (!symbols.length) {
+        throw new Error("No breakout candidates available to export.");
+    }
+    const payload = { symbols };
+    if (typeof result?.timeframe === "string" && result.timeframe.trim()) {
+        payload.timeframe = result.timeframe;
+    }
+    const watchlistName = buildScanWatchlistName(result);
+    if (watchlistName) {
+        payload.watchlist_name = watchlistName;
+    }
+    return payload;
+}
+
+function sanitizeFilename(name, fallbackBase = "watchlist") {
+    let base = typeof name === "string" ? name.trim() : "";
+    if (!base) {
+        base = fallbackBase;
+    }
+    if (base.toLowerCase().endsWith(".csv")) {
+        base = base.slice(0, -4);
+    }
+    const sanitized = base.replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
+    return `${sanitized || fallbackBase}.csv`;
+}
+
+function extractFilenameFromDisposition(headerValue, fallbackBase = "watchlist") {
+    if (typeof headerValue !== "string" || !headerValue.trim()) {
+        return sanitizeFilename("", fallbackBase);
+    }
+    const starMatch = headerValue.match(/filename\*=([^;]+)/i);
+    if (starMatch && starMatch[1]) {
+        let value = starMatch[1].trim();
+        if (value.toLowerCase().startsWith("utf-8''")) {
+            value = value.slice(7);
+        }
+        try {
+            value = decodeURIComponent(value);
+        } catch (error) {
+            // ignore decode failures
+        }
+        return sanitizeFilename(value, fallbackBase);
+    }
+    const plainMatch = headerValue.match(/filename=([^;]+)/i);
+    if (plainMatch && plainMatch[1]) {
+        let value = plainMatch[1].trim();
+        if (value.startsWith("\"") && value.endsWith("\"")) {
+            value = value.slice(1, -1);
+        }
+        return sanitizeFilename(value, fallbackBase);
+    }
+    return sanitizeFilename("", fallbackBase);
+}
+
+async function handleScanExport(event) {
+    if (event) {
+        event.preventDefault();
+    }
+    const button = elements.scanExportButton;
+    if (!button || button.disabled) {
+        return;
+    }
+    if (!latestScanResult) {
+        setScanStatus("Run the scan to populate candidates before exporting.", "warning");
+        return;
+    }
+
+    let payload;
+    try {
+        payload = buildScanExportPayload(latestScanResult);
+    } catch (error) {
+        setScanStatus(error?.message || "No candidates available to export.", "warning");
+        return;
+    }
+
+    const originalLabel = button.dataset.originalLabel || button.textContent?.trim() || "Export to IBKR CSV";
+    button.disabled = true;
+    button.textContent = "Exporting…";
+
+    const fallbackBase = payload.watchlist_name || "vcp_scan";
+
+    try {
+        const response = await fetch("/api/vcp/scan/export", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+            const errorMessage = await readErrorMessage(response);
+            throw new Error(errorMessage);
+        }
+
+        const blob = await response.blob();
+        const filename = extractFilenameFromDisposition(response.headers.get("Content-Disposition"), fallbackBase);
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = filename;
+        document.body.append(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
+
+        const exportedCount = payload.symbols.length;
+        setScanStatus(
+            `Exported ${exportedCount} candidate${exportedCount === 1 ? "" : "s"} to IBKR CSV.`,
+            "success",
+        );
+    } catch (error) {
+        console.error("Failed to export IBKR watchlist", error);
+        setScanStatus(error?.message || "Failed to export watchlist.", "error");
+    } finally {
+        button.disabled = false;
+        button.textContent = originalLabel;
+    }
 }
 
 function formatDateTime(value) {

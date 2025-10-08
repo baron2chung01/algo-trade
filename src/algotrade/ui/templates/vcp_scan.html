@@ -39,16 +39,20 @@
         <h2 class="form-section-title">Criteria</h2>
         <p>Select which rule sets to enforce when filtering results.</p>
         <label class="checkbox">
-          <input type="checkbox" id="criterion-flag-vcp" value="flag_vcp" data-scan-criterion checked />
-          Flag/VCP
+          <input type="checkbox" id="criterion-liquidity" value="liquidity" data-scan-criterion checked />
+          Liquidity Filter
         </label>
         <label class="checkbox">
-          <input type="checkbox" id="criterion-minervini" value="minervini" data-scan-criterion checked />
-          Minervini Criteria
+          <input type="checkbox" id="criterion-uptrend" value="uptrend_breakout" data-scan-criterion checked />
+          Uptrend Nearing Breakout
         </label>
         <label class="checkbox">
-          <input type="checkbox" id="criterion-qullamagie" value="qullamagie" data-scan-criterion checked />
-          Qullamagie Criteria
+          <input type="checkbox" id="criterion-higher-lows" value="higher_lows" data-scan-criterion checked />
+          Higher Lows
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" id="criterion-volume" value="volume_contraction" data-scan-criterion checked />
+          Volume Contracting
         </label>
       </div>
 
@@ -83,6 +87,7 @@
     <div class="metric-group">
       <div class="metric-group-header">
         <h3>Breakout Candidates</h3>
+        <button id="scan-export-button" type="button" class="button button--secondary button--small" disabled>Export to IBKR CSV</button>
       </div>
       <div class="table-scroll">
         <table id="scan-table">
@@ -90,14 +95,15 @@
             <tr>
               <th>Symbol</th>
               <th>Close</th>
+              <th>Market Cap</th>
               <th>Monthly $ Volume</th>
               <th>RS Percentile</th>
-              <th>Flag/VCP Pass</th>
-              <th>Weekly Contraction</th>
-              <th>Monthly Contraction</th>
-              <th>Minervini Criteria</th>
-              <th>Qullamagie Score</th>
-              <th>Qullamagie Criteria</th>
+              <th>Liquidity Filter</th>
+              <th>Uptrend Nearing Breakout</th>
+              <th>Higher Lows</th>
+              <th>Volume Contracting</th>
+              <th>Daily Dist. %</th>
+              <th>Weekly Dist. %</th>
             </tr>
           </thead>
           <tbody id="scan-table-body"></tbody>

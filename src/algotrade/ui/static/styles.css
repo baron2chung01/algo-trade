@@ -312,6 +312,30 @@ a:focus {
   pointer-events: none;
 }
 
+.button--secondary {
+  background: rgba(14, 165, 233, 0.12);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  box-shadow: none;
+}
+
+.button--secondary:not(:disabled):hover,
+.button--secondary:not(:disabled):focus-visible {
+  background: rgba(14, 165, 233, 0.22);
+  color: #ecfeff;
+}
+
+.button--secondary:disabled {
+  background: rgba(100, 116, 139, 0.18);
+  color: rgba(148, 163, 184, 0.6);
+  border-color: rgba(148, 163, 184, 0.35);
+}
+
+.button--small {
+  padding: 0.45rem 0.9rem;
+  font-size: 0.85rem;
+}
+
 .coming-soon {
   margin: 4rem auto;
   max-width: 720px;

@@ -216,3 +216,49 @@ def test_optimize_endpoint_supports_vcp(tmp_path):
     params = aapl["optimization"]["best_parameters"]
     assert params["base_lookback_days"] == 50
     assert params["pivot_lookback_days"] == 3
+
+
+def test_vcp_scan_export_generates_ibkr_csv():
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/vcp/scan/export",
+        json={
+            "symbols": ["aapl", "msft", "AAPL"],
+            "watchlist_name": "VCP Medium Scan",
+            "timeframe": "medium",
+        },
+    )
+
+    assert response.status_code == 200
+    content_type = response.headers.get("content-type", "")
+    assert content_type.startswith("text/csv")
+    disposition = response.headers.get("content-disposition", "")
+    assert "attachment" in disposition.lower()
+    assert "VCP_Medium_Scan.csv" in disposition
+
+    lines = response.text.strip().splitlines()
+    assert lines == [
+        "SYM,AAPL,SMART/AMEX",
+        "SYM,MSFT,SMART/AMEX",
+    ]
+
+
+def test_vcp_scan_export_requires_symbols():
+    client = TestClient(create_app())
+    response = client.post("/api/vcp/scan/export", json={"symbols": []})
+    assert response.status_code == 422
+
+
+def test_vcp_scan_export_allows_custom_route():
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/vcp/scan/export",
+        json={
+            "symbols": ["spy"],
+            "route": "smart /arca",
+        },
+    )
+
+    assert response.status_code == 200
+    lines = response.text.strip().splitlines()
+    assert lines == ["SYM,SPY,SMART/ARCA"]

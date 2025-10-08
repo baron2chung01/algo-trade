@@ -15,6 +15,8 @@ def _build_daily_frame(
     daily_slope: float,
     start_date: datetime,
     sessions: int,
+    volume_start: float = 600_000.0,
+    volume_end: float = 200_000.0,
 ) -> pd.DataFrame:
     dates = pd.date_range(
         start=start_date, periods=sessions, freq="B", tz=timezone.utc)
@@ -39,7 +41,7 @@ def _build_daily_frame(
         lows[idx] = closes[idx] * low_factor
 
     opens = closes * 0.995
-    volumes = np.full(sessions, 400_000.0)
+    volumes = np.linspace(volume_start, volume_end, sessions)
     averages = (highs + lows + closes) / 3
     bar_count = np.full(sessions, 100)
 
@@ -68,6 +70,8 @@ def test_vcp_scan_applies_new_rule_set(tmp_path):
         daily_slope=0.22,
         start_date=start_date,
         sessions=sessions,
+        volume_start=900_000.0,
+        volume_end=300_000.0,
     )
     spy_frame = _build_daily_frame(
         start_price=100.0,
@@ -87,9 +91,15 @@ def test_vcp_scan_applies_new_rule_set(tmp_path):
         max_candidates=10,
     )
 
-    assert summary.parameters.rule_set == "Flag/VCP + Minervini Criteria + Qullamagie Criteria"
+    assert summary.parameters.rule_set == (
+        "Liquidity Filter + Uptrend Nearing Breakout + Higher Lows + Volume Contracting"
+    )
     assert summary.parameters.criteria == (
-        "flag_vcp", "minervini", "qullamagie")
+        "liquidity",
+        "uptrend_breakout",
+        "higher_lows",
+        "volume_contraction",
+    )
     assert summary.symbols_scanned == 1
     assert summary.analysis_timestamp is not None
     assert not summary.warnings
@@ -97,14 +107,18 @@ def test_vcp_scan_applies_new_rule_set(tmp_path):
     assert len(summary.candidates) == 1
     candidate = summary.candidates[0]
     assert candidate.symbol == "AAPL"
-    assert candidate.flag_vcp_pass is True
-    assert candidate.weekly_contraction is True
-    assert candidate.monthly_contraction is True
-    assert candidate.minervini_pass is True
-    assert candidate.qullamagie_score > 3.5
-    assert candidate.qullamagie_pass is True
-    assert candidate.monthly_dollar_volume > 1_500_000
-    assert candidate.rs_percentile is not None and candidate.rs_percentile >= 75.0
+    assert candidate.liquidity_pass
+    assert candidate.market_cap_pass
+    assert candidate.close_above_sma20
+    assert candidate.rs_percentile_pass
+    assert candidate.uptrend_breakout_pass
+    assert candidate.higher_lows_pass
+    assert candidate.volume_contraction_pass
+    assert candidate.market_cap is not None and candidate.market_cap > 2_000_000_000
+    assert candidate.monthly_dollar_volume is not None and candidate.monthly_dollar_volume > 1_500_000
+    assert candidate.daily_breakout_distance_pct is not None
+    assert candidate.weekly_breakout_distance_pct is not None
+    assert candidate.rs_percentile is not None and candidate.rs_percentile > 70.0
 
 
 def test_vcp_scan_respects_selected_criteria(tmp_path):
@@ -117,18 +131,10 @@ def test_vcp_scan_respects_selected_criteria(tmp_path):
         daily_slope=0.18,
         start_date=start_date,
         sessions=sessions,
+        volume_start=250_000.0,
+        volume_end=80_000.0,
     )
     weak_flag_frame = strong_frame.copy()
-    final_rows = weak_flag_frame.index[-5:]
-    weak_flag_frame.loc[final_rows,
-                        "high"] = weak_flag_frame.loc[final_rows, "close"] * 1.20
-    weak_flag_frame.loc[final_rows,
-                        "low"] = weak_flag_frame.loc[final_rows, "close"] * 0.95
-    weak_flag_frame.loc[final_rows, "average"] = (
-        weak_flag_frame.loc[final_rows, "high"]
-        + weak_flag_frame.loc[final_rows, "low"]
-        + weak_flag_frame.loc[final_rows, "close"]
-    ) / 3.0
 
     spy_frame = _build_daily_frame(
         start_price=100.0,
@@ -146,17 +152,40 @@ def test_vcp_scan_respects_selected_criteria(tmp_path):
         bar_size="1d",
         symbols=["BETA"],
         max_candidates=5,
-        criteria=["minervini", "qullamagie"],
+        criteria=["uptrend_breakout", "higher_lows", "volume_contraction"],
     )
 
-    assert summary.parameters.criteria == ("minervini", "qullamagie")
-    assert summary.parameters.rule_set == "Minervini Criteria + Qullamagie Criteria"
+    assert summary.parameters.criteria == (
+        "uptrend_breakout",
+        "higher_lows",
+        "volume_contraction",
+    )
+    assert summary.parameters.rule_set == "Uptrend Nearing Breakout + Higher Lows + Volume Contracting"
     assert len(summary.candidates) == 1
 
     candidate = summary.candidates[0]
     assert candidate.symbol == "BETA"
-    assert candidate.flag_vcp_pass is False
-    assert candidate.weekly_contraction is False
-    assert candidate.minervini_pass is True
-    assert candidate.qullamagie_pass is True
-    assert candidate.rs_percentile is not None and candidate.rs_percentile >= 75.0
+    assert not candidate.liquidity_pass
+    assert not candidate.market_cap_pass
+    assert candidate.uptrend_breakout_pass
+    assert candidate.higher_lows_pass
+    assert candidate.volume_contraction_pass
+    assert candidate.rs_percentile is not None and candidate.rs_percentile > 70.0
+
+    strict_summary = scan_vcp_candidates(
+        store_path=tmp_path,
+        timeframe="medium",
+        bar_size="1d",
+        symbols=["BETA"],
+        max_candidates=5,
+        criteria=["liquidity", "uptrend_breakout",
+                  "higher_lows", "volume_contraction"],
+    )
+
+    assert strict_summary.parameters.criteria == (
+        "liquidity",
+        "uptrend_breakout",
+        "higher_lows",
+        "volume_contraction",
+    )
+    assert len(strict_summary.candidates) == 0

@@ -94,9 +94,10 @@ _SCAN_TIMEFRAME_PRESETS: Dict[str, Dict[str, float | int | None]] = {
 }
 
 VCP_SCAN_CRITERIA_LABELS: Dict[str, str] = {
-    "flag_vcp": "Flag/VCP",
-    "minervini": "Minervini Criteria",
-    "qullamagie": "Qullamagie Criteria",
+    "liquidity": "Liquidity Filter",
+    "uptrend_breakout": "Uptrend Nearing Breakout",
+    "higher_lows": "Higher Lows",
+    "volume_contraction": "Volume Contracting",
 }
 VCP_SCAN_CRITERIA_ORDER: Tuple[str, ...] = tuple(
     VCP_SCAN_CRITERIA_LABELS.keys())
@@ -335,7 +336,7 @@ def default_vcp_spec() -> VCPParameterSpec:
 
 @dataclass(slots=True)
 class VCPScanParameters:
-    rule_set: str = "Flag/VCP + Minervini + Qullamagie"
+    rule_set: str = "Liquidity Filter + Uptrend Nearing Breakout + Higher Lows + Volume Contracting"
     criteria: Tuple[str, ...] = field(
         default_factory=lambda: DEFAULT_VCP_SCAN_CRITERIA
     )
@@ -345,14 +346,18 @@ class VCPScanParameters:
 class VCPScanCandidate:
     symbol: str
     close_price: float
-    monthly_dollar_volume: float
+    market_cap: float | None
+    monthly_dollar_volume: float | None
     rs_percentile: float | None
-    qullamagie_score: float
-    flag_vcp_pass: bool
-    weekly_contraction: bool
-    monthly_contraction: bool
-    minervini_pass: bool
-    qullamagie_pass: bool
+    liquidity_pass: bool
+    market_cap_pass: bool
+    close_above_sma20: bool
+    rs_percentile_pass: bool
+    uptrend_breakout_pass: bool
+    daily_breakout_distance_pct: float | None
+    weekly_breakout_distance_pct: float | None
+    higher_lows_pass: bool
+    volume_contraction_pass: bool
     analysis_timestamp: datetime
 
 
@@ -1161,11 +1166,13 @@ def _describe_scan_rule_set(criteria: Sequence[str]) -> str:
 
 def _meets_selected_criteria(metrics: Mapping[str, Any], criteria: Sequence[str]) -> bool:
     for key in criteria:
-        if key == "flag_vcp" and not metrics.get("flag_vcp_pass", False):
+        if key == "liquidity" and not metrics.get("liquidity_pass", False):
             return False
-        if key == "minervini" and not metrics.get("minervini_pass", False):
+        if key == "uptrend_breakout" and not metrics.get("uptrend_breakout_pass", False):
             return False
-        if key == "qullamagie" and not metrics.get("qullamagie_pass", False):
+        if key == "higher_lows" and not metrics.get("higher_lows_pass", False):
+            return False
+        if key == "volume_contraction" and not metrics.get("volume_contraction_pass", False):
             return False
     return True
 
@@ -1214,7 +1221,7 @@ def scan_vcp_candidates(
             warnings.append(f"Missing historical data for {symbol}.")
             continue
 
-        symbol_metrics = _evaluate_flag_vcp_minervini_qullamagie(
+        symbol_metrics = _evaluate_vcp_scan_metrics(
             symbol=symbol,
             frame=frame,
             spy_monthly=spy_monthly,
@@ -1239,27 +1246,48 @@ def scan_vcp_candidates(
     for metrics in metrics_bundle:
         rs_percentile = _percentile(metrics["rs_value"])
         metrics["rs_percentile"] = rs_percentile
+        metrics["rs_percentile_pass"] = (
+            rs_percentile is not None and rs_percentile > 70.0
+        )
+        metrics["liquidity_pass"] = (
+            metrics.get("market_cap_pass", False)
+            and metrics.get("close_above_sma20", False)
+            and metrics.get("rs_percentile_pass", False)
+        )
+
         if not _meets_selected_criteria(metrics, selected_criteria):
-            continue
-        if rs_percentile is None or rs_percentile < 75.0:
             continue
         candidate = VCPScanCandidate(
             symbol=metrics["symbol"],
             close_price=metrics["close"],
-            monthly_dollar_volume=metrics["monthly_dollar_volume"],
+            market_cap=metrics.get("market_cap"),
+            monthly_dollar_volume=metrics.get("monthly_dollar_volume"),
             rs_percentile=rs_percentile,
-            qullamagie_score=metrics["qullamagie_score"],
-            flag_vcp_pass=metrics["flag_vcp_pass"],
-            weekly_contraction=metrics["weekly_contraction"],
-            monthly_contraction=metrics["monthly_contraction"],
-            minervini_pass=metrics["minervini_pass"],
-            qullamagie_pass=metrics["qullamagie_pass"],
+            liquidity_pass=metrics["liquidity_pass"],
+            market_cap_pass=metrics.get("market_cap_pass", False),
+            close_above_sma20=metrics.get("close_above_sma20", False),
+            rs_percentile_pass=metrics.get("rs_percentile_pass", False),
+            uptrend_breakout_pass=metrics.get("uptrend_breakout_pass", False),
+            daily_breakout_distance_pct=metrics.get(
+                "daily_breakout_distance_pct"),
+            weekly_breakout_distance_pct=metrics.get(
+                "weekly_breakout_distance_pct"),
+            higher_lows_pass=metrics.get("higher_lows_pass", False),
+            volume_contraction_pass=metrics.get(
+                "volume_contraction_pass", False),
             analysis_timestamp=metrics["analysis_timestamp"],
         )
         candidates.append(candidate)
 
-    candidates.sort(key=lambda item: (
-        (item.rs_percentile or 0.0), item.qullamagie_score), reverse=True)
+    candidates.sort(
+        key=lambda item: (
+            -(item.rs_percentile if item.rs_percentile is not None else -1.0),
+            -(item.market_cap if item.market_cap is not None else 0.0),
+            item.daily_breakout_distance_pct
+            if item.daily_breakout_distance_pct is not None
+            else float("inf"),
+        )
+    )
     if max_candidates > 0:
         candidates = candidates[:max_candidates]
 
@@ -1314,7 +1342,38 @@ def _resample_ohlcv(frame: pd.DataFrame, rule: str) -> pd.DataFrame:
     return aggregated
 
 
-def _evaluate_flag_vcp_minervini_qullamagie(
+def _estimate_market_cap(frame: pd.DataFrame) -> float | None:
+    if "market_cap" in frame.columns:
+        series = pd.to_numeric(frame["market_cap"], errors="coerce")
+        series = series.dropna()
+        if not series.empty:
+            latest = float(series.iloc[-1])
+            if np.isfinite(latest) and latest > 0:
+                return latest
+
+    close_series = pd.to_numeric(frame.get("close"), errors="coerce")
+    volume_series = pd.to_numeric(frame.get("volume"), errors="coerce")
+    if close_series is None or volume_series is None:
+        return None
+
+    close_series = close_series.dropna()
+    volume_series = volume_series.dropna()
+    if close_series.empty or volume_series.empty:
+        return None
+
+    avg_volume = volume_series.rolling(63, min_periods=20).mean().iloc[-1]
+    latest_close = close_series.iloc[-1]
+    if not np.isfinite(avg_volume) or avg_volume <= 0:
+        return None
+    if not np.isfinite(latest_close) or latest_close <= 0:
+        return None
+
+    estimated_shares = avg_volume * 63.0
+    estimated_cap = latest_close * estimated_shares
+    return float(estimated_cap) if np.isfinite(estimated_cap) else None
+
+
+def _evaluate_vcp_scan_metrics(
     *,
     symbol: str,
     frame: pd.DataFrame,
@@ -1324,115 +1383,137 @@ def _evaluate_flag_vcp_minervini_qullamagie(
         return None
 
     ordered = frame.sort_values("timestamp").reset_index(drop=True)
-    close_series = ordered["close"].astype(float)
-    high_series = ordered["high"].astype(float)
-    low_series = ordered["low"].astype(float)
-    if len(close_series) < 252:
+    ordered["timestamp"] = pd.to_datetime(ordered["timestamp"], utc=True)
+
+    close_series = pd.to_numeric(ordered["close"], errors="coerce")
+    high_series = pd.to_numeric(ordered["high"], errors="coerce")
+    low_series = pd.to_numeric(ordered["low"], errors="coerce")
+    volume_series = pd.to_numeric(ordered["volume"], errors="coerce")
+
+    if close_series.isna().all() or high_series.isna().all() or low_series.isna().all():
         return None
 
-    sma10_series = close_series.rolling(10)
-    sma20_series = close_series.rolling(20)
-    sma50_series = close_series.rolling(50)
-    sma150_series = close_series.rolling(150)
-    sma200_series = close_series.rolling(200)
-    ema20_series = close_series.ewm(span=20, adjust=False)
-
-    sma10 = sma10_series.mean().iloc[-1]
-    sma20 = sma20_series.mean().iloc[-1]
-    sma50 = sma50_series.mean().iloc[-1]
-    sma150 = sma150_series.mean().iloc[-1]
-    sma200 = sma200_series.mean().iloc[-1]
-    sma200_prev = sma200_series.mean().shift(25).iloc[-1]
-    ema20 = ema20_series.mean().iloc[-1]
-
-    if any(np.isnan(value) for value in [sma10, sma20, sma50, sma150, sma200, sma200_prev, ema20]):
+    minimum_required = 130
+    if len(close_series) < minimum_required:
         return None
 
-    close = float(close_series.iloc[-1])
-
-    flag_conditions = (
-        sma10 > sma20
-        and close > sma20
-        and close <= ema20 * 1.05
-    )
-
-    weekly = _resample_ohlcv(ordered, "W-FRI")
-    if len(weekly) < 5:
+    close_value = float(close_series.iloc[-1])
+    if not np.isfinite(close_value):
         return None
-    weekly_ranges = (weekly["high"] - weekly["low"]).astype(float)
-    weekly_contraction = bool(
-        (weekly_ranges.iloc[-5:-1] >= weekly_ranges.iloc[-1]).all())
+
+    sma20_series = close_series.rolling(20, min_periods=20).mean()
+    sma20 = float(
+        sma20_series.iloc[-1]) if not np.isnan(sma20_series.iloc[-1]) else float("nan")
+    close_above_sma20 = np.isfinite(sma20) and close_value > sma20
+
+    market_cap = _estimate_market_cap(ordered)
+    market_cap_pass = market_cap is not None and market_cap > 2_000_000_000.0
 
     monthly = _resample_ohlcv(ordered, "ME")
-    if len(monthly) < 3:
-        return None
-    monthly_ranges = (monthly["high"] - monthly["low"]).astype(float)
-    monthly_contraction = bool(
-        (monthly_ranges.iloc[-3:-1] >= monthly_ranges.iloc[-1]).all())
+    monthly_dollar_volume: float | None = None
+    if not monthly.empty:
+        last_close = pd.to_numeric(monthly["close"], errors="coerce").iloc[-1]
+        last_volume = pd.to_numeric(
+            monthly["volume"], errors="coerce").iloc[-1]
+        if np.isfinite(last_close) and np.isfinite(last_volume):
+            monthly_dollar_volume = float(last_close * last_volume)
 
-    monthly_dollar_volume = float(
-        monthly["close"].iloc[-1] * monthly["volume"].iloc[-1])
-    dollar_volume_pass = monthly_dollar_volume > 1_500_000
+    # Daily breakout proximity (100-day high excluding current bar)
+    daily_breakout_distance_pct: float | None = None
+    daily_breakout_high: float | None = None
+    daily_breakout_pass = False
+    if len(high_series) >= 100:
+        high_ref_series = high_series.shift(
+            1).rolling(100, min_periods=50).max()
+        candidate_high = high_ref_series.iloc[-1]
+        if np.isfinite(candidate_high) and candidate_high > 0:
+            daily_breakout_high = float(candidate_high)
+            daily_breakout_distance_pct = abs(
+                close_value - daily_breakout_high) / daily_breakout_high
+            daily_breakout_pass = (
+                close_value <= daily_breakout_high
+                and close_value >= daily_breakout_high * 0.93
+            )
 
-    flag_vcp_pass = (
-        flag_conditions
-        and weekly_contraction
-        and monthly_contraction
-        and dollar_volume_pass
-    )
+    weekly = _resample_ohlcv(ordered, "W-FRI")
+    weekly_breakout_distance_pct: float | None = None
+    weekly_breakout_high: float | None = None
+    weekly_breakout_pass = False
+    if not weekly.empty:
+        weekly_high_series = pd.to_numeric(weekly["high"], errors="coerce")
+        weekly_close_series = pd.to_numeric(weekly["close"], errors="coerce")
+        weekly_high_ref = weekly_high_series.shift(1).rolling(
+            100, min_periods=min(10, len(weekly_high_series))).max()
+        candidate_weekly_high = weekly_high_ref.iloc[-1]
+        weekly_close = weekly_close_series.iloc[-1]
+        if np.isfinite(candidate_weekly_high) and candidate_weekly_high > 0 and np.isfinite(weekly_close):
+            weekly_breakout_high = float(candidate_weekly_high)
+            weekly_breakout_distance_pct = abs(
+                weekly_close - weekly_breakout_high) / weekly_breakout_high
+            weekly_breakout_pass = (
+                weekly_close >= weekly_breakout_high * 0.80
+                and weekly_close <= weekly_breakout_high * 1.20
+            )
 
-    min_low_252 = float(low_series.rolling(252).min().iloc[-1])
-    max_high_252 = float(high_series.rolling(252).max().iloc[-1])
+    uptrend_breakout_pass = daily_breakout_pass and weekly_breakout_pass
 
-    minervini_pass = (
-        close > sma200
-        and close > sma150
-        and sma150 > sma200
-        and sma200 > sma200_prev
-        and sma50 > sma200
-        and sma50 > sma150
-        and close > sma50
-        and close > 1.3 * min_low_252
-        and close > 0.75 * max_high_252
-    )
+    def _compare_low(length: int) -> bool:
+        if len(low_series) < length * 2:
+            return False
+        recent_window = low_series.iloc[-length:]
+        prior_window = low_series.iloc[-(2 * length):-length]
+        recent_low = recent_window.min()
+        prior_low = prior_window.min()
+        if not np.isfinite(recent_low) or not np.isfinite(prior_low):
+            return False
+        return float(recent_low) > float(prior_low)
 
-    qullamagie_score = _compute_qullamagie_score(high_series, low_series)
-    if qullamagie_score is None:
-        return None
-    qullamagie_pass = qullamagie_score > 3.5
+    higher_low_lengths = (10, 20, 30)
+    higher_lows_map = {length: _compare_low(
+        length) for length in higher_low_lengths}
+    higher_lows_pass = all(higher_lows_map.values())
+
+    volume_contraction_offsets: list[int] = []
+    volume_sma = volume_series.rolling(20, min_periods=20).mean()
+    volume_sma_shifted = volume_sma.shift(1)
+    ma_current = volume_sma_shifted.iloc[-1] if len(
+        volume_sma_shifted) else float("nan")
+    if np.isfinite(ma_current):
+        for offset in (5, 10, 15, 20, 25, 30):
+            idx = len(volume_sma_shifted) - 1 - offset
+            if idx < 0:
+                continue
+            ma_past = volume_sma_shifted.iloc[idx]
+            if np.isfinite(ma_past) and ma_current < ma_past:
+                volume_contraction_offsets.append(offset)
+        volume_contraction_pass = bool(volume_contraction_offsets)
+    else:
+        volume_contraction_pass = False
 
     rs_value = _compute_relative_strength(monthly, spy_monthly)
 
-    analysis_timestamp = pd.to_datetime(
-        ordered["timestamp"].iloc[-1]).to_pydatetime()
+    analysis_timestamp = ordered["timestamp"].iloc[-1].to_pydatetime()
 
     return {
         "symbol": symbol,
-        "close": close,
-        "monthly_dollar_volume": monthly_dollar_volume,
-        "weekly_contraction": weekly_contraction,
-        "monthly_contraction": monthly_contraction,
-        "flag_vcp_pass": flag_vcp_pass,
-        "minervini_pass": minervini_pass,
-        "qullamagie_score": float(qullamagie_score),
-        "qullamagie_pass": qullamagie_pass,
+        "close": close_value,
         "analysis_timestamp": analysis_timestamp,
+        "market_cap": market_cap,
+        "market_cap_pass": market_cap_pass,
+        "monthly_dollar_volume": monthly_dollar_volume,
+        "close_above_sma20": bool(close_above_sma20),
+        "sma20": sma20 if np.isfinite(sma20) else None,
+        "uptrend_breakout_pass": uptrend_breakout_pass,
+        "daily_breakout_distance_pct": daily_breakout_distance_pct,
+        "daily_breakout_high": daily_breakout_high,
+        "weekly_breakout_distance_pct": weekly_breakout_distance_pct,
+        "weekly_breakout_high": weekly_breakout_high,
+        "higher_lows_pass": higher_lows_pass,
+        "higher_lows_map": higher_lows_map,
+        "volume_contraction_pass": volume_contraction_pass,
+        "volume_contraction_offsets": volume_contraction_offsets,
         "rs_value": rs_value,
     }
-
-
-def _compute_qullamagie_score(high_series: pd.Series, low_series: pd.Series) -> Optional[float]:
-    if len(high_series) < 20 or len(low_series) < 20:
-        return None
-    recent_high = high_series.astype(float).iloc[-20:]
-    recent_low = low_series.astype(float).iloc[-20:]
-    if (recent_low <= 0).any():
-        return None
-    ratios = recent_high / recent_low
-    score = 100.0 * (ratios.mean() - 1.0)
-    if not np.isfinite(score):
-        return None
-    return float(score)
 
 
 def _compute_relative_strength(symbol_monthly: pd.DataFrame, spy_monthly: Optional[pd.DataFrame]) -> Optional[float]:

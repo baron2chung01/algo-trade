@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import asdict, fields, is_dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
@@ -12,7 +13,7 @@ from typing import Any, Dict, Iterable, List
 
 import pandas as pd
 from fastapi import Body, FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -63,9 +64,10 @@ class VCPScanTimeframe(str, Enum):
 
 
 class VCPScanCriterion(str, Enum):
-    FLAG_VCP = "flag_vcp"
-    MINERVINI = "minervini"
-    QULLAMAGIE = "qullamagie"
+    LIQUIDITY = "liquidity"
+    UPTREND_BREAKOUT = "uptrend_breakout"
+    HIGHER_LOWS = "higher_lows"
+    VOLUME_CONTRACTION = "volume_contraction"
 
 
 class VCPFetchRequest(BaseModel):
@@ -534,6 +536,57 @@ class VCPPatternRequest(BaseModel):
         return self
 
 
+class VCPScanExportRequest(BaseModel):
+    symbols: List[str] = Field(
+        default_factory=list,
+        description="Symbols to include in the exported watchlist",
+    )
+    watchlist_name: str | None = Field(
+        default=None,
+        description="Optional display name used for the download filename.",
+    )
+    timeframe: str | None = Field(
+        default=None,
+        description="Optional timeframe label appended to the download filename when present.",
+    )
+    route: str = Field(
+        default="SMART/AMEX",
+        description="Routing or exchange specification for the watchlist rows (e.g. SMART/AMEX).",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "VCPScanExportRequest":
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for symbol in self.symbols:
+            candidate = symbol.strip().upper()
+            if not candidate or candidate in seen:
+                continue
+            cleaned.append(candidate)
+            seen.add(candidate)
+        if not cleaned:
+            raise ValueError("At least one symbol must be provided.")
+        self.symbols = cleaned
+
+        if self.watchlist_name:
+            normalized_name = " ".join(self.watchlist_name.strip().split())
+            normalized_name = normalized_name.replace(",", " ")
+            self.watchlist_name = normalized_name or None
+
+        if self.timeframe:
+            normalized_timeframe = " ".join(self.timeframe.strip().split())
+            normalized_timeframe = normalized_timeframe.replace(",", " ")
+            self.timeframe = normalized_timeframe or None
+
+        route_value = (self.route or "SMART/AMEX").strip().upper()
+        route_value = re.sub(r"\s+", "", route_value)
+        self.route = route_value or "SMART/AMEX"
+
+        return self
+
+
 def create_app(templates_dir: Path | None = None, static_dir: Path | None = None) -> FastAPI:
     """Create and configure the FastAPI application."""
 
@@ -853,6 +906,24 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
 
         return JSONResponse(payload)
 
+    @app.post("/api/vcp/scan/export", response_class=PlainTextResponse)
+    async def export_vcp_watchlist(request_body: VCPScanExportRequest) -> PlainTextResponse:
+        csv_body = _generate_ibkr_watchlist_csv(
+            request_body.symbols,
+            route=request_body.route,
+        )
+
+        filename_seed = request_body.watchlist_name or f"vcp_{request_body.timeframe or 'scan'}"
+        filename = _build_watchlist_filename(filename_seed)
+
+        response = PlainTextResponse(
+            csv_body,
+            media_type="text/csv; charset=utf-8",
+        )
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.post("/api/vcp/testing", response_class=JSONResponse)
     async def scan_vcp_testing(request_body: VCPPatternRequest) -> JSONResponse:
         store_root = Path(
@@ -891,6 +962,42 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
         return JSONResponse(payload)
 
     return app
+
+
+def _generate_ibkr_watchlist_csv(
+    symbols: Iterable[str],
+    *,
+    route: str,
+    description_label: str | None = None,
+) -> str:
+    lines: list[str] = []
+    route_value = route.strip().upper()
+    label_suffix = ""
+    if description_label:
+        trimmed = description_label.strip()
+        if trimmed:
+            label_suffix = f" · {trimmed}"
+
+    for symbol in symbols:
+        entry = symbol.strip().upper()
+        if not entry:
+            continue
+        label = f"{entry}{label_suffix}" if label_suffix else entry
+        row_parts = ["SYM", label]
+        if route_value:
+            row_parts.append(route_value)
+        lines.append(",".join(row_parts))
+
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _build_watchlist_filename(name: str) -> str:
+    base = name.strip() or "watchlist"
+    if base.lower().endswith(".csv"):
+        base = base[:-4]
+    sanitized = re.sub(r"[^A-Za-z0-9_-]+", "_", base)
+    sanitized = sanitized.strip("_") or "watchlist"
+    return f"{sanitized}.csv"
 
 
 def _maybe_fetch_polygon_data(
@@ -1039,14 +1146,24 @@ def _serialize_scan_candidate(candidate: VCPScanCandidate) -> Dict[str, Any]:
     return {
         "symbol": candidate.symbol,
         "close_price": float(candidate.close_price),
-        "monthly_dollar_volume": float(candidate.monthly_dollar_volume),
+        "market_cap": float(candidate.market_cap) if candidate.market_cap is not None else None,
+        "monthly_dollar_volume": float(candidate.monthly_dollar_volume)
+        if candidate.monthly_dollar_volume is not None
+        else None,
         "rs_percentile": float(candidate.rs_percentile) if candidate.rs_percentile is not None else None,
-        "qullamagie_score": float(candidate.qullamagie_score),
-        "flag_vcp_pass": bool(candidate.flag_vcp_pass),
-        "weekly_contraction": bool(candidate.weekly_contraction),
-        "monthly_contraction": bool(candidate.monthly_contraction),
-        "minervini_pass": bool(candidate.minervini_pass),
-        "qullamagie_pass": bool(candidate.qullamagie_pass),
+        "liquidity_pass": bool(candidate.liquidity_pass),
+        "market_cap_pass": bool(candidate.market_cap_pass),
+        "close_above_sma20": bool(candidate.close_above_sma20),
+        "rs_percentile_pass": bool(candidate.rs_percentile_pass),
+        "uptrend_breakout_pass": bool(candidate.uptrend_breakout_pass),
+        "daily_breakout_distance_pct": float(candidate.daily_breakout_distance_pct)
+        if candidate.daily_breakout_distance_pct is not None
+        else None,
+        "weekly_breakout_distance_pct": float(candidate.weekly_breakout_distance_pct)
+        if candidate.weekly_breakout_distance_pct is not None
+        else None,
+        "higher_lows_pass": bool(candidate.higher_lows_pass),
+        "volume_contraction_pass": bool(candidate.volume_contraction_pass),
         "analysis_timestamp": _to_iso(candidate.analysis_timestamp),
     }
 
