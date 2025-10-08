@@ -152,6 +152,7 @@ python -m scripts.run_ui --store-path data/raw/quantconnect/daily --port 8000
 - Navigate to <http://127.0.0.1:8000> and enter the symbols, RSI thresholds, and allocation settings you want to inspect.
 - The page overlays buy markers on top of candlesticks, streams the cumulative equity curve, and highlights metrics such as net profit, total return, and drawdown.
 - Adjust the `--store-path` flag (or `ALGO_TRADE_STORE_PATH` environment variable) to point at the Parquet cache containing historical bars.
+- On the VCP page, pick between an exhaustive grid search or the new simulated annealing optimizer. Grid runs every combination in your parameter ranges, while annealing samples the search space using the iteration, temperature, and cooling settings exposed in the form.
 
 ## Repository layout (work in progress)
 

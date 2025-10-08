@@ -1,7 +1,543 @@
-{% extends "base.html" %} {% block title %}VCP Dashboard (Coming Soon){% endblock %} {% block page_id %}vcp{% endblock %} {% block content %}
-<section class="coming-soon">
-  <h1>Volatility Contraction Pattern</h1>
-  <p>We're building a dedicated dashboard for the VCP playbook. Check back soon for optimization controls, metrics, and charting tailored to volatility contraction setups.</p>
-  <a class="button" href="/">Return to Home</a>
+{% extends "base.html" %} {% block title %}VCP Optimizing{% endblock %} {% block page_id %}vcp{% endblock %} {% block head_scripts %}
+<script src="https://cdn.plot.ly/plotly-2.30.0.min.js" defer></script>
+{% endblock %} {% block footer_scripts %}
+<script src="/static/app.js" type="module" defer></script>
+{% endblock %} {% block content %}
+<div class="page-intro">
+  <h1>VCP Optimizing</h1>
+  <p class="page-intro__subtitle">
+    Run a two-phase walk-forward test on Volatility Contraction Pattern setups. Pick a universe, tune the parameter grid, and review paper-testing equity curves alongside
+    annotations.
+  </p>
+</div>
+<section class="layout">
+  <aside class="control-panel">
+    <form id="control-form" class="control-form">
+      <input type="hidden" id="strategy" name="strategy" value="vcp" />
+
+      <div class="form-section">
+        <h2 class="form-section-title">Universe</h2>
+        <label>
+          Cached symbols
+          <select id="available-symbols" multiple size="8"></select>
+        </label>
+        <label>
+          Extra symbols
+          <input id="extra-symbols" name="extra_symbols" type="text" placeholder="e.g. AAPL, TSLA" />
+        </label>
+      </div>
+
+      <div class="form-section">
+        <h2 class="form-section-title">Simulation Settings</h2>
+        <div class="form-grid">
+          <label>
+            Initial cash ($)
+            <input name="initial_cash" type="number" min="1000" step="500" value="10000" />
+          </label>
+          <label>
+            Bar limit
+            <input name="limit" type="number" min="0" step="10" value="250" />
+          </label>
+          <label>
+            Paper window (days)
+            <input name="paper_days" type="number" min="60" step="30" value="360" />
+          </label>
+          <label>
+            Training window (years)
+            <input name="training_years" type="number" min="1" step="0.5" value="2" />
+          </label>
+        </div>
+        <label class="form-checkbox">
+          <input id="auto-fetch" name="auto_fetch" type="checkbox" />
+          <span>Download missing Polygon data automatically</span>
+        </label>
+      </div>
+
+      <div class="form-section" id="vcp-search-section">
+        <h2 class="form-section-title">Search Strategy</h2>
+        <p class="form-help">
+          <strong>Grid search</strong> evaluates every combination in the parameter ranges. Switch to <strong>Simulated annealing</strong> to sample the search space more
+          aggressively when the grid balloons—tune iterations, temperature, and cooling to balance speed versus exploration.
+        </p>
+        <div class="form-grid" id="vcp-search-grid">
+          <label>
+            Algorithm
+            <select id="vcp_search_strategy" name="vcp_search_strategy">
+              <option value="grid" selected>Grid search (exhaustive)</option>
+              <option value="annealing">Simulated annealing</option>
+            </select>
+          </label>
+          <label>
+            Iterations
+            <input name="vcp_search_iterations" type="number" min="1" max="5000" step="1" value="150" />
+          </label>
+        </div>
+        <div id="vcp-annealing-settings" class="form-grid">
+          <label>
+            Initial temperature
+            <input name="vcp_initial_temperature" type="number" min="0.1" step="0.1" value="1.0" data-annealing-input data-default-value="1.0" />
+          </label>
+          <label>
+            Cooling rate
+            <input name="vcp_cooling_rate" type="number" min="0.5" max="0.999" step="0.01" value="0.95" data-annealing-input data-default-value="0.95" />
+            <small class="form-help">Lower values cool faster; stay below 1.0.</small>
+          </label>
+          <label>
+            Random seed (optional)
+            <input name="vcp_random_seed" type="number" min="0" step="1" placeholder="Auto" data-annealing-input data-default-value="" />
+            <small class="form-help">Use for deterministic annealing runs; leave blank to randomize.</small>
+          </label>
+        </div>
+      </div>
+
+      <div class="form-section form-section--params" id="vcp-params">
+        <h2 class="form-section-title">VCP Parameters</h2>
+        <div class="range-grid">
+          <div class="range-group">
+            <span class="range-title">Base Structure (days)</span>
+            <label>
+              Min
+              <input name="vcp_base_lookback_min" type="number" min="20" max="120" step="5" value="45" />
+            </label>
+            <label>
+              Max
+              <input name="vcp_base_lookback_max" type="number" min="20" max="160" step="5" value="60" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_base_lookback_step" type="number" min="1" max="60" step="1" value="15" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Pivot Scan (days)</span>
+            <label>
+              Min
+              <input name="vcp_pivot_lookback_min" type="number" min="2" max="20" step="1" value="4" />
+            </label>
+            <label>
+              Max
+              <input name="vcp_pivot_lookback_max" type="number" min="2" max="20" step="1" value="6" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_pivot_lookback_step" type="number" min="1" max="10" step="1" value="2" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Contractions</span>
+            <label>
+              Min count
+              <input name="vcp_min_contractions_min" type="number" min="2" max="6" step="1" value="3" />
+            </label>
+            <label>
+              Max count
+              <input name="vcp_min_contractions_max" type="number" min="2" max="6" step="1" value="3" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_min_contractions_step" type="number" min="1" max="3" step="1" value="1" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Max Contraction (%)</span>
+            <label>
+              Min
+              <input name="vcp_max_contraction_min" type="number" min="1" max="50" step="0.5" value="12" />
+            </label>
+            <label>
+              Max
+              <input name="vcp_max_contraction_max" type="number" min="1" max="50" step="0.5" value="16" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_max_contraction_step" type="number" min="0.5" max="20" step="0.5" value="4" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Decay Factor (%)</span>
+            <label>
+              Min
+              <input name="vcp_decay_min" type="number" min="30" max="100" step="1" value="60" />
+            </label>
+            <label>
+              Max
+              <input name="vcp_decay_max" type="number" min="30" max="100" step="1" value="80" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_decay_step" type="number" min="1" max="30" step="1" value="20" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Breakout Buffer (%)</span>
+            <label>
+              Min
+              <input name="vcp_buffer_min" type="number" min="0" max="2" step="0.01" value="0.1" />
+            </label>
+            <label>
+              Max
+              <input name="vcp_buffer_max" type="number" min="0" max="2" step="0.01" value="0.3" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_buffer_step" type="number" min="0.01" max="1" step="0.01" value="0.2" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Volume Squeeze Ratio</span>
+            <label>
+              Min
+              <input name="vcp_squeeze_min" type="number" min="0.1" max="1" step="0.01" value="0.65" />
+            </label>
+            <label>
+              Max
+              <input name="vcp_squeeze_max" type="number" min="0.1" max="1" step="0.01" value="0.85" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_squeeze_step" type="number" min="0.01" max="0.5" step="0.01" value="0.2" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Breakout Volume Ratio</span>
+            <label>
+              Min
+              <input name="vcp_breakout_volume_min" type="number" min="1" max="5" step="0.01" value="1.8" />
+            </label>
+            <label>
+              Max
+              <input name="vcp_breakout_volume_max" type="number" min="1" max="5" step="0.01" value="2.1" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_breakout_volume_step" type="number" min="0.01" max="2" step="0.01" value="0.3" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Volume Lookback (days)</span>
+            <label>
+              Min
+              <input name="vcp_volume_lookback_min" type="number" min="5" max="60" step="1" value="18" />
+            </label>
+            <label>
+              Max
+              <input name="vcp_volume_lookback_max" type="number" min="5" max="60" step="1" value="24" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_volume_lookback_step" type="number" min="1" max="20" step="1" value="6" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Trend MA (days)</span>
+            <label>
+              Min
+              <input name="vcp_trend_ma_min" type="number" min="10" max="200" step="5" value="45" />
+            </label>
+            <label>
+              Max
+              <input name="vcp_trend_ma_max" type="number" min="10" max="200" step="5" value="60" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_trend_ma_step" type="number" min="1" max="50" step="1" value="15" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Stop Loss (R-multiple)</span>
+            <label>
+              Min
+              <input name="vcp_stop_r_min" type="number" min="0.1" max="5" step="0.01" value="0.9" />
+            </label>
+            <label>
+              Max
+              <input name="vcp_stop_r_max" type="number" min="0.1" max="5" step="0.01" value="1.1" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_stop_r_step" type="number" min="0.01" max="2" step="0.01" value="0.2" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Profit Target (R-multiple)</span>
+            <label>
+              Min
+              <input name="vcp_target_r_min" type="number" min="0.5" max="10" step="0.01" value="2" />
+            </label>
+            <label>
+              Max
+              <input name="vcp_target_r_max" type="number" min="0.5" max="10" step="0.01" value="2.5" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_target_r_step" type="number" min="0.01" max="5" step="0.01" value="0.5" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Trailing Stop (R-multiple)</span>
+            <label class="form-checkbox">
+              <input id="vcp_use_trailing_range" name="vcp_use_trailing_range" type="checkbox" checked />
+              <span>Enable trailing-stop evaluation</span>
+            </label>
+            <label>
+              Min
+              <input name="vcp_trailing_r_min" type="number" min="0.5" max="5" step="0.01" value="1.5" data-vcp-trailing-range />
+            </label>
+            <label>
+              Max
+              <input name="vcp_trailing_r_max" type="number" min="0.5" max="5" step="0.01" value="1.5" data-vcp-trailing-range />
+            </label>
+            <label>
+              Step
+              <input name="vcp_trailing_r_step" type="number" min="0.01" max="2" step="0.01" value="0.1" data-vcp-trailing-range />
+            </label>
+            <label class="form-checkbox">
+              <input id="vcp_include_no_trailing" name="vcp_include_no_trailing" type="checkbox" checked />
+              <span>Include no trailing-stop option</span>
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Max Hold (days)</span>
+            <label>
+              Min
+              <input name="vcp_hold_min" type="number" min="0" max="180" step="1" value="0" data-vcp-hold-range />
+            </label>
+            <label>
+              Max
+              <input name="vcp_hold_max" type="number" min="0" max="180" step="1" value="0" data-vcp-hold-range />
+            </label>
+            <label>
+              Step
+              <input name="vcp_hold_step" type="number" min="1" max="60" step="1" value="1" data-vcp-hold-range />
+            </label>
+            <label class="form-checkbox">
+              <input id="vcp_hold_infinite" name="vcp_hold_infinite" type="checkbox" checked />
+              <span>Include infinite hold</span>
+            </label>
+            <label class="form-checkbox">
+              <input id="vcp_hold_only_infinite" name="vcp_hold_only_infinite" type="checkbox" checked />
+              <span>Use only infinite hold</span>
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Target Position (%)</span>
+            <label>
+              Min
+              <input name="vcp_target_pct_min" type="number" min="5" max="50" step="1" value="15" />
+            </label>
+            <label>
+              Max
+              <input name="vcp_target_pct_max" type="number" min="5" max="50" step="1" value="15" />
+            </label>
+            <label>
+              Step
+              <input name="vcp_target_pct_step" type="number" min="1" max="20" step="1" value="1" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Lot Size</span>
+            <label>
+              Shares per trade
+              <input name="vcp_lot_size" type="number" min="1" step="1" value="1" />
+            </label>
+          </div>
+          <div class="range-group">
+            <span class="range-title">Cash Reserve (%)</span>
+            <label>
+              Reserve percent
+              <input name="vcp_cash_reserve" type="number" min="0" max="50" step="1" value="10" />
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <button id="run-button" type="submit">Optimize Strategy</button>
+    </form>
+
+    <div class="status" id="status"></div>
+  </aside>
+
+  <section class="metrics" id="metrics">
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Paper Testing Metrics</h3>
+        <span id="paper-window" class="metric-window"></span>
+      </div>
+      <div class="metric-grid" id="paper-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Training Metrics</h3>
+        <span id="training-window" class="metric-window"></span>
+      </div>
+      <div class="metric-grid" id="training-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Optimal Parameters</h3>
+      </div>
+      <div class="metric-grid" id="parameter-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Top Candidates</h3>
+      </div>
+      <div class="table-scroll">
+        <table id="ranking-table">
+          <thead>
+            <tr>
+              <th>Parameters</th>
+              <th>CAGR</th>
+              <th>Total Return</th>
+              <th>Final Equity</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section class="chart-container">
+    <div class="chart-header">
+      <h2 id="chart-title">Candlestick Chart</h2>
+      <select id="symbol-select" class="symbol-select"></select>
+    </div>
+    <div id="chart" class="chart"></div>
+  </section>
+
+  <section class="chart-container">
+    <div class="chart-header">
+      <h2>Equity Curve</h2>
+    </div>
+    <div id="equity-chart" class="chart"></div>
+  </section>
+</section>
+
+<div class="page-intro">
+  <h2>VCP Pattern Testing</h2>
+  <p class="page-intro__subtitle">
+    Pull up to three years of daily bars for any symbol list and highlight Volatility Contraction Patterns on synchronized price and volume charts. Choose a preset, adjust
+    lookback, and drill into each breakout setup.
+  </p>
+</div>
+
+<section class="layout" id="vcp-testing">
+  <aside class="control-panel">
+    <form id="vcp-test-form" class="control-form">
+      <div class="form-section">
+        <h2 class="form-section-title">Symbols</h2>
+        <p class="form-help">Comma- or space-separated tickers. Leave blank to reuse the optimization universe (or sample defaults).</p>
+        <textarea id="vcp-test-symbols" name="symbols" rows="3" placeholder="AAPL, MSFT, NVDA"></textarea>
+      </div>
+
+      <div class="form-section">
+        <h2 class="form-section-title">Preset</h2>
+        <div class="form-grid">
+          <label>
+            Timeframe
+            <select id="vcp-test-timeframe" name="timeframe">
+              <option value="short">Short (45-day base)</option>
+              <option value="medium" selected>Medium (60-day base)</option>
+              <option value="long">Long (75-day base)</option>
+            </select>
+          </label>
+          <label>
+            Lookback (years)
+            <input id="vcp-test-lookback" name="lookback_years" type="number" min="1" max="5" step="0.5" value="3" />
+          </label>
+          <label>
+            Max detections
+            <input id="vcp-test-max-detections" name="max_detections" type="number" min="1" step="1" value="8" />
+          </label>
+        </div>
+      </div>
+
+      <button id="vcp-test-run" type="submit">Find Patterns</button>
+    </form>
+
+    <div class="status" id="vcp-test-status"></div>
+  </aside>
+
+  <section class="metrics" id="vcp-testing-results">
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Summary</h3>
+      </div>
+      <div class="metric-grid">
+        <div class="metric-card">
+          <span class="metric-label">Patterns detected</span>
+          <span class="metric-value" id="vcp-test-summary-detections">0</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">Timeframe</span>
+          <span class="metric-value" id="vcp-test-summary-timeframe">–</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">Analysis window</span>
+          <span class="metric-value" id="vcp-test-summary-window">–</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">Parameters</span>
+          <span class="metric-value" id="vcp-test-summary-parameters">–</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Detections</h3>
+      </div>
+      <div class="table-scroll">
+        <table id="vcp-test-table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Breakout</th>
+              <th>Entry</th>
+              <th>Reward/Risk</th>
+              <th>Base window</th>
+            </tr>
+          </thead>
+          <tbody id="vcp-test-table-body">
+            <tr>
+              <td colspan="5" class="metric-empty">Run the test to populate detections.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="metric-group" id="vcp-test-warnings-group" hidden>
+      <div class="metric-group-header">
+        <h3>Warnings</h3>
+      </div>
+      <ul id="vcp-test-warnings" class="warning-list"></ul>
+    </div>
+  </section>
+</section>
+
+<section class="chart-container">
+  <div class="chart-header">
+    <h2 id="vcp-test-chart-title">VCP Candlestick</h2>
+    <div>
+      <label>
+        Symbol
+        <select id="vcp-test-symbol-select"></select>
+      </label>
+      <label>
+        Detection
+        <select id="vcp-test-detection-select"></select>
+      </label>
+    </div>
+  </div>
+  <div id="vcp-test-chart" class="chart"></div>
+</section>
+
+<section class="chart-container">
+  <div class="chart-header">
+    <h2>Volume</h2>
+  </div>
+  <div id="vcp-test-volume-chart" class="chart"></div>
 </section>
 {% endblock %}

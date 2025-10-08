@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, fields, is_dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from math import ceil
@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -19,12 +19,23 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..config import AppSettings
 from ..data.stores.local import ParquetBarStore
-from ..data.ingest import ingest_polygon_daily
+from ..data.ingest import ingest_polygon_daily, update_polygon_daily_incremental
 from ..experiments import (
     BreakoutParameterSpec,
     FloatRange,
+    VCPParameterSpec,
+    VCPParameters,
+    VCPPatternDetection,
+    VCPPatternSeries,
+    default_vcp_spec,
+    default_vcp_scan_universe,
     optimize_breakout_parameters,
     optimize_mean_reversion_parameters,
+    optimize_vcp_parameters,
+    VCPScanCandidate,
+    scan_vcp_candidates,
+    scan_vcp_history,
+    technology_universe_symbols,
 )
 from ..experiments.mean_reversion import HoldRange, OptimizationParameterSpec, ParameterRange
 from ..strategies import BreakoutPattern
@@ -34,10 +45,32 @@ DEFAULT_STORE_PATH = Path(
 DEFAULT_BAR_SIZE = "1d"
 DEFAULT_SYMBOLS = ("AAPL", "MSFT")
 
+_VCP_PARAMETER_FIELDS = {field.name for field in fields(VCPParameters)}
+
 
 class StrategyName(str, Enum):
     MEAN_REVERSION = "mean_reversion"
     BREAKOUT = "breakout"
+    VCP = "vcp"
+
+
+class VCPScanTimeframe(str, Enum):
+    SHORT = "short"
+    MEDIUM = "medium"
+    LONG = "long"
+
+
+class VCPFetchRequest(BaseModel):
+    force_refresh_universe: bool = Field(
+        default=True,
+        description="When true, refresh the technology universe membership before fetching data.",
+    )
+    lookback_years: int = Field(
+        default=5,
+        ge=1,
+        le=10,
+        description="Years of history to seed when no cached data exists for a symbol.",
+    )
 
 
 class RangeRequest(BaseModel):
@@ -217,6 +250,97 @@ class BreakoutParameterSpecRequest(BaseModel):
         )
 
 
+class VCPParameterSpecRequest(BaseModel):
+    base_lookback_days: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=45, maximum=60, step=15)
+    )
+    pivot_lookback_days: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=4, maximum=6, step=2)
+    )
+    min_contractions: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=3, maximum=3, step=1)
+    )
+    max_contraction_pct: FloatRangeRequest = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=0.12, maximum=0.16, step=0.04)
+    )
+    contraction_decay: FloatRangeRequest = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=0.6, maximum=0.8, step=0.2)
+    )
+    breakout_buffer_pct: FloatRangeRequest = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=0.001, maximum=0.003, step=0.002)
+    )
+    volume_squeeze_ratio: FloatRangeRequest = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=0.65, maximum=0.85, step=0.2)
+    )
+    breakout_volume_ratio: FloatRangeRequest = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=1.8, maximum=2.1, step=0.3)
+    )
+    volume_lookback_days: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=18, maximum=24, step=6)
+    )
+    trend_ma_period: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=45, maximum=60, step=15)
+    )
+    stop_loss_r_multiple: FloatRangeRequest = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=0.9, maximum=1.1, step=0.2)
+    )
+    profit_target_r_multiple: FloatRangeRequest = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=2.0, maximum=2.5, step=0.5)
+    )
+    trailing_stop_r_multiple: FloatRangeRequest | None = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=1.5, maximum=1.5, step=0.1)
+    )
+    include_no_trailing_stop: bool = True
+    max_hold_days: HoldRangeRequest = Field(
+        default_factory=lambda: HoldRangeRequest(
+            minimum=0,
+            maximum=0,
+            step=1,
+            include_infinite=True,
+            only_infinite=True,
+        )
+    )
+    target_position_pct: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=15, maximum=15, step=1)
+    )
+    lot_size: int = Field(1, gt=0)
+    cash_reserve_pct: float = Field(0.1, ge=0.0, lt=1.0)
+
+    model_config = ConfigDict(extra="forbid")
+
+    def to_spec(self) -> VCPParameterSpec:
+        trailing = self.trailing_stop_r_multiple.to_range(
+        ) if self.trailing_stop_r_multiple else None
+        return VCPParameterSpec(
+            base_lookback_days=self.base_lookback_days.to_range(),
+            pivot_lookback_days=self.pivot_lookback_days.to_range(),
+            min_contractions=self.min_contractions.to_range(),
+            max_contraction_pct=self.max_contraction_pct.to_range(),
+            contraction_decay=self.contraction_decay.to_range(),
+            breakout_buffer_pct=self.breakout_buffer_pct.to_range(),
+            volume_squeeze_ratio=self.volume_squeeze_ratio.to_range(),
+            breakout_volume_ratio=self.breakout_volume_ratio.to_range(),
+            volume_lookback_days=self.volume_lookback_days.to_range(),
+            trend_ma_period=self.trend_ma_period.to_range(),
+            stop_loss_r_multiple=self.stop_loss_r_multiple.to_range(),
+            profit_target_r_multiple=self.profit_target_r_multiple.to_range(),
+            trailing_stop_r_multiple=trailing,
+            include_no_trailing_stop=self.include_no_trailing_stop,
+            max_hold_days=self.max_hold_days.to_hold_range(),
+            target_position_pct=self.target_position_pct.to_range(),
+            lot_size=self.lot_size,
+            cash_reserve_pct=self.cash_reserve_pct,
+        )
+
+
 class OptimizationRequest(BaseModel):
     symbols: List[str] = Field(default_factory=list)
     initial_cash: float = Field(10_000.0, gt=0)
@@ -233,6 +357,14 @@ class OptimizationRequest(BaseModel):
         default=None, alias="parameter_spec"
     )
     breakout_spec: BreakoutParameterSpecRequest | None = None
+    vcp_spec: VCPParameterSpecRequest | None = None
+    vcp_search_strategy: str = Field(
+        "grid", description="Optimization search strategy for VCP"
+    )
+    vcp_search_iterations: int = Field(150, ge=1)
+    vcp_initial_temperature: float = Field(1.0, gt=0.0)
+    vcp_cooling_rate: float = Field(0.95, gt=0.0, lt=1.0)
+    vcp_random_seed: int | None = Field(default=None)
     include_warnings: bool = True
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
@@ -271,6 +403,114 @@ class OptimizationRequest(BaseModel):
             return None
         return self.breakout_spec.to_spec()
 
+    def resolve_vcp_spec(self) -> VCPParameterSpec:
+        if self.vcp_spec is None:
+            return default_vcp_spec()
+        return self.vcp_spec.to_spec()
+
+    def resolve_vcp_search_kwargs(self) -> Dict[str, float | int | None | str]:
+        strategy = self.vcp_search_strategy.strip().lower()
+        if strategy not in {"grid", "annealing"}:
+            raise ValueError(
+                "Unsupported VCP search strategy. Choose 'grid' or 'annealing'."
+            )
+        if self.vcp_random_seed is not None and self.vcp_random_seed < 0:
+            raise ValueError("Random seed must be non-negative.")
+        return {
+            "search_strategy": strategy,
+            "search_iterations": int(self.vcp_search_iterations),
+            "initial_temperature": float(self.vcp_initial_temperature),
+            "cooling_rate": float(self.vcp_cooling_rate),
+            "random_seed": self.vcp_random_seed,
+        }
+
+
+class VCPScanRequest(BaseModel):
+    timeframe: VCPScanTimeframe = Field(default=VCPScanTimeframe.MEDIUM)
+    overrides: Dict[str, float | int | None] | None = Field(default=None)
+    store_path: str | None = None
+    bar_size: str = Field(DEFAULT_BAR_SIZE, description="Historical bar size")
+    symbols: List[str] | None = Field(default=None)
+    max_candidates: int = Field(50, ge=0)
+    include_warnings: bool = True
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "VCPScanRequest":
+        normalized_bar_size = self.bar_size.strip().lower()
+        if normalized_bar_size != DEFAULT_BAR_SIZE:
+            raise ValueError("Only 1d bar size is currently supported.")
+        self.bar_size = normalized_bar_size
+
+        if self.symbols:
+            cleaned: list[str] = []
+            seen: set[str] = set()
+            for symbol in self.symbols:
+                candidate = symbol.strip().upper()
+                if not candidate or candidate in seen:
+                    continue
+                cleaned.append(candidate)
+                seen.add(candidate)
+            self.symbols = cleaned or None
+        else:
+            self.symbols = None
+
+        if self.overrides:
+            normalized: Dict[str, float | int | None] = {}
+            for key, value in self.overrides.items():
+                key = key.strip()
+                if key not in _VCP_PARAMETER_FIELDS:
+                    raise ValueError(f"Unsupported override '{key}'.")
+                normalized[key] = value
+            self.overrides = normalized or None
+
+        return self
+
+
+class VCPPatternRequest(BaseModel):
+    symbols: List[str] = Field(default_factory=list)
+    timeframe: VCPScanTimeframe = Field(default=VCPScanTimeframe.MEDIUM)
+    overrides: Dict[str, float | int | None] | None = Field(default=None)
+    store_path: str | None = None
+    bar_size: str = Field(DEFAULT_BAR_SIZE, description="Historical bar size")
+    lookback_years: float = Field(3.0, gt=0.0, le=10.0)
+    max_detections: int = Field(8, ge=1, le=100)
+    include_warnings: bool = True
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "VCPPatternRequest":
+        normalized_bar_size = self.bar_size.strip().lower()
+        if normalized_bar_size != DEFAULT_BAR_SIZE:
+            raise ValueError("Only 1d bar size is currently supported.")
+        self.bar_size = normalized_bar_size
+
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for symbol in self.symbols:
+            candidate = symbol.strip().upper()
+            if not candidate or candidate in seen:
+                continue
+            cleaned.append(candidate)
+            seen.add(candidate)
+        if not cleaned:
+            raise ValueError(
+                "At least one symbol must be provided for VCP testing.")
+        self.symbols = cleaned
+
+        if self.overrides:
+            normalized: Dict[str, float | int | None] = {}
+            for key, value in self.overrides.items():
+                key = key.strip()
+                if key not in _VCP_PARAMETER_FIELDS:
+                    raise ValueError(f"Unsupported override '{key}'.")
+                normalized[key] = value
+            self.overrides = normalized or None
+
+        return self
+
 
 def create_app(templates_dir: Path | None = None, static_dir: Path | None = None) -> FastAPI:
     """Create and configure the FastAPI application."""
@@ -302,6 +542,10 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
     async def render_vcp(request: Request) -> HTMLResponse:
         return templates.TemplateResponse("vcp.html", {"request": request})
 
+    @app.get("/vcp-scan", response_class=HTMLResponse)
+    async def render_vcp_scan(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse("vcp_scan.html", {"request": request})
+
     @app.get("/momentum", response_class=HTMLResponse)
     async def render_momentum(request: Request) -> HTMLResponse:
         return templates.TemplateResponse("momentum.html", {"request": request})
@@ -325,6 +569,82 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
         store = ParquetBarStore(store_root)
         symbols = store.list_symbols(normalized_bar_size)
         return JSONResponse({"symbols": symbols})
+
+    @app.get("/api/vcp/universe", response_class=JSONResponse)
+    async def get_vcp_universe(
+        store_path: str = Query(
+            default=str(DEFAULT_STORE_PATH),
+            description="Path to the Parquet bar store to inspect.",
+        ),
+        bar_size: str = Query(
+            default=DEFAULT_BAR_SIZE,
+            description="Historical bar size to match the cached data.",
+        ),
+    ) -> JSONResponse:
+        normalized_bar_size = bar_size.strip().lower()
+        if normalized_bar_size != DEFAULT_BAR_SIZE:
+            raise HTTPException(
+                status_code=400, detail="Only 1d bar size is supported.")
+
+        store_root = Path(store_path).expanduser().resolve()
+        try:
+            symbols, missing, warnings = default_vcp_scan_universe(
+                store_root, bar_size=normalized_bar_size
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        payload: Dict[str, object] = {"symbols": symbols}
+        if missing:
+            payload["missing"] = missing
+        if warnings:
+            payload["warnings"] = warnings
+        return JSONResponse(payload)
+
+    @app.post("/api/vcp/universe/fetch", response_class=JSONResponse)
+    async def fetch_vcp_universe_data(
+        request_body: VCPFetchRequest | None = Body(default=None),
+    ) -> JSONResponse:
+        params = request_body or VCPFetchRequest()
+
+        symbols, universe_warnings = technology_universe_symbols(
+            force_refresh=params.force_refresh_universe
+        )
+        if not symbols:
+            raise HTTPException(
+                status_code=503,
+                detail="No technology-sector symbols available from Polygon.",
+            )
+
+        try:
+            report = update_polygon_daily_incremental(
+                symbols,
+                settings=AppSettings(),
+                lookback_years=params.lookback_years,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - unexpected failure
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        combined_warnings: list[str] = []
+        combined_warnings.extend(universe_warnings)
+        combined_warnings.extend(report.warnings)
+
+        payload = {
+            "total_symbols": len(symbols),
+            "updated_symbols": report.updated,
+            "updated_count": sum(report.updated.values()),
+            "skipped_symbols": report.skipped,
+            "written_paths": [str(path) for path in report.written_paths],
+            "lookback_years": params.lookback_years,
+            "force_refresh_universe": params.force_refresh_universe,
+        }
+        if combined_warnings:
+            payload["warnings"] = combined_warnings
+        return JSONResponse(payload)
 
     @app.post("/api/optimize", response_class=JSONResponse)
     async def optimize(request_body: OptimizationRequest) -> JSONResponse:
@@ -369,17 +689,6 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
                 },
             )
 
-        mean_reversion_spec = (
-            request_body.resolve_mean_reversion_spec()
-            if request_body.strategy == StrategyName.MEAN_REVERSION
-            else None
-        )
-        breakout_spec = (
-            request_body.resolve_breakout_spec()
-            if request_body.strategy == StrategyName.BREAKOUT
-            else None
-        )
-
         results: Dict[str, Any] = {}
         symbol_warnings: List[Dict[str, str]] = []
 
@@ -396,6 +705,7 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
 
             try:
                 if request_body.strategy == StrategyName.MEAN_REVERSION:
+                    mean_reversion_spec = request_body.resolve_mean_reversion_spec()
                     optimization = optimize_mean_reversion_parameters(
                         store_path=store_root,
                         universe=[symbol],
@@ -405,7 +715,8 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
                         bar_size=request_body.bar_size,
                         parameter_spec=mean_reversion_spec,
                     )
-                else:
+                elif request_body.strategy == StrategyName.BREAKOUT:
+                    breakout_spec = request_body.resolve_breakout_spec()
                     optimization = optimize_breakout_parameters(
                         store_path=store_root,
                         universe=[symbol],
@@ -414,6 +725,18 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
                         paper_window=paper_window,
                         bar_size=request_body.bar_size,
                         parameter_spec=breakout_spec,
+                    )
+                else:
+                    vcp_spec = request_body.resolve_vcp_spec()
+                    optimization = optimize_vcp_parameters(
+                        store_path=store_root,
+                        universe=[symbol],
+                        initial_cash=request_body.initial_cash,
+                        training_window=training_window,
+                        paper_window=paper_window,
+                        bar_size=request_body.bar_size,
+                        parameter_spec=vcp_spec,
+                        **request_body.resolve_vcp_search_kwargs(),
                     )
             except ValueError as exc:
                 symbol_warnings.append({"symbol": symbol, "reason": str(exc)})
@@ -427,6 +750,10 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
             equity_curve = _serialize_equity_curve(
                 optimization.paper_result.equity_curve)
             metrics = _normalize_metrics(optimization.paper_metrics)
+            annotations_map = _serialize_annotations(
+                getattr(optimization, "paper_annotations", {})
+            )
+            annotations = annotations_map.get(symbol, [])
 
             results[symbol] = {
                 "candles": candles,
@@ -435,6 +762,7 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
                 "metrics": metrics,
                 "optimization": _serialize_optimization_summary(optimization),
                 "strategy": request_body.strategy.value,
+                "annotations": annotations,
             }
 
         if not results:
@@ -459,6 +787,81 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
                 "message": "Some symbols were skipped because their data files were missing or lacked sufficient coverage.",
                 "missing": aggregated_warnings,
             }
+
+        return JSONResponse(payload)
+
+    @app.post("/api/vcp/scan", response_class=JSONResponse)
+    async def scan_vcp(request_body: VCPScanRequest) -> JSONResponse:
+        store_root = Path(
+            request_body.store_path or DEFAULT_STORE_PATH).expanduser().resolve()
+        try:
+            summary = scan_vcp_candidates(
+                store_path=store_root,
+                timeframe=request_body.timeframe.value,
+                overrides=request_body.overrides,
+                bar_size=request_body.bar_size,
+                symbols=request_body.symbols,
+                max_candidates=request_body.max_candidates,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        payload: Dict[str, Any] = {
+            "timeframe": summary.timeframe,
+            "analysis_timestamp": summary.analysis_timestamp.isoformat()
+            if summary.analysis_timestamp
+            else None,
+            "symbols_scanned": summary.symbols_scanned,
+            "parameters": asdict(summary.parameters),
+            "candidates": [
+                _serialize_scan_candidate(candidate)
+                for candidate in summary.candidates
+            ],
+            "store_path": str(store_root),
+        }
+
+        if request_body.symbols is not None:
+            payload["requested_symbols"] = request_body.symbols
+
+        if request_body.include_warnings and summary.warnings:
+            payload["warnings"] = summary.warnings
+
+        return JSONResponse(payload)
+
+    @app.post("/api/vcp/testing", response_class=JSONResponse)
+    async def scan_vcp_testing(request_body: VCPPatternRequest) -> JSONResponse:
+        store_root = Path(
+            request_body.store_path or DEFAULT_STORE_PATH).expanduser().resolve()
+        try:
+            summary = scan_vcp_history(
+                store_path=store_root,
+                symbols=request_body.symbols,
+                timeframe=request_body.timeframe.value,
+                overrides=request_body.overrides,
+                bar_size=request_body.bar_size,
+                lookback_years=request_body.lookback_years,
+                max_detections=request_body.max_detections,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        payload: Dict[str, Any] = {
+            "requested_symbols": request_body.symbols,
+            "symbols": list(summary.results.keys()),
+            "timeframe": request_body.timeframe.value,
+            "lookback_years": float(request_body.lookback_years),
+            "results": {
+                symbol: _serialize_vcp_pattern_series(series)
+                for symbol, series in summary.results.items()
+            },
+            "store_path": str(store_root),
+        }
+
+        if summary.missing:
+            payload["missing"] = summary.missing
+
+        if request_body.include_warnings and summary.warnings:
+            payload["warnings"] = summary.warnings
 
         return JSONResponse(payload)
 
@@ -607,6 +1010,58 @@ def _determine_optimization_windows(
     return (train_start, train_end), (paper_start, paper_end)
 
 
+def _serialize_scan_candidate(candidate: VCPScanCandidate) -> Dict[str, Any]:
+    return {
+        "symbol": candidate.symbol,
+        "close_price": float(candidate.close_price),
+        "entry_price": float(candidate.entry_price),
+        "stop_price": float(candidate.stop_price),
+        "target_price": float(candidate.target_price),
+        "risk_per_share": float(candidate.risk_per_share),
+        "reward_to_risk": float(candidate.reward_to_risk),
+        "resistance": float(candidate.resistance),
+        "base_low": float(candidate.base_low),
+        "breakout_timestamp": _to_iso(candidate.breakout_timestamp),
+        "volume": float(candidate.volume) if candidate.volume is not None else None,
+    }
+
+
+def _serialize_vcp_detection(detection: VCPPatternDetection) -> Dict[str, Any]:
+    return {
+        "breakout_timestamp": _to_iso(detection.breakout_timestamp),
+        "base_start": _to_iso(detection.base_start),
+        "base_end": _to_iso(detection.base_end),
+        "entry_price": float(detection.entry_price),
+        "stop_price": float(detection.stop_price),
+        "target_price": float(detection.target_price),
+        "resistance": float(detection.resistance),
+        "base_low": float(detection.base_low),
+        "breakout_price": float(detection.breakout_price),
+        "breakout_volume": float(detection.breakout_volume),
+        "risk_per_share": float(detection.risk_per_share),
+        "reward_to_risk": float(detection.reward_to_risk),
+    }
+
+
+def _serialize_vcp_pattern_series(series: VCPPatternSeries) -> Dict[str, Any]:
+    detections = [_serialize_vcp_detection(item)
+                  for item in series.detections]
+    payload: Dict[str, Any] = {
+        "candles": _serialize_candles(series.frame),
+        "detections": detections,
+        "detection_count": len(detections),
+        "parameters": asdict(series.parameters),
+    }
+    if series.analysis_start and series.analysis_end:
+        payload["analysis_window"] = {
+            "start": _to_iso(series.analysis_start),
+            "end": _to_iso(series.analysis_end),
+        }
+    if series.warnings:
+        payload["warnings"] = list(series.warnings)
+    return payload
+
+
 def _serialize_candles(frame: pd.DataFrame) -> List[Dict[str, Any]]:
     return [
         {
@@ -636,6 +1091,26 @@ def _serialize_signals(trades: Iterable[Any]) -> Dict[str, List[Dict[str, Any]]]
     for entries in signals.values():
         entries.sort(key=lambda item: item["timestamp"])
     return signals
+
+
+def _serialize_annotations(raw: Dict[str, Iterable[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
+    formatted: Dict[str, List[Dict[str, Any]]] = {}
+    for symbol, entries in raw.items():
+        line_items: List[Dict[str, Any]] = []
+        for entry in entries:
+            payload: Dict[str, Any] = {
+                "timestamp": entry.get("timestamp"),
+                "entry": _coerce_float(entry.get("entry")),
+                "stop": _coerce_float(entry.get("stop")),
+                "target": _coerce_float(entry.get("target")),
+                "resistance": _coerce_float(entry.get("resistance")),
+                "base_low": _coerce_float(entry.get("base_low")),
+                "risk_per_share": _coerce_float(entry.get("risk_per_share")),
+            }
+            line_items.append(payload)
+        line_items.sort(key=lambda item: item.get("timestamp") or "")
+        formatted[symbol] = line_items
+    return formatted
 
 
 def _serialize_equity_curve(curve: Iterable[tuple[datetime, float]]) -> List[Dict[str, Any]]:
@@ -749,3 +1224,12 @@ def _to_iso(value: Any) -> str:
     else:
         ts = ts.tz_convert("UTC")
     return ts.isoformat()
+
+
+def _coerce_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

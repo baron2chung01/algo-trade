@@ -1,16 +1,20 @@
 const DEFAULT_SYMBOLS = ["AAPL", "MSFT"];
 const STRATEGY_MEAN_REVERSION = "mean_reversion";
 const STRATEGY_BREAKOUT = "breakout";
+const STRATEGY_VCP = "vcp";
 
 const pageId = document.body?.dataset?.page || "";
 
 const elements = {
     form: document.getElementById("control-form"),
+    scanForm: document.getElementById("scan-form"),
     status: document.getElementById("status"),
+    scanStatus: document.getElementById("scan-status"),
     paperMetrics: document.getElementById("paper-metrics"),
     trainingMetrics: document.getElementById("training-metrics"),
     parameterMetrics: document.getElementById("parameter-metrics"),
     rankingTableBody: document.querySelector("#ranking-table tbody"),
+    scanTableBody: document.getElementById("scan-table-body"),
     paperWindow: document.getElementById("paper-window"),
     trainingWindow: document.getElementById("training-window"),
     chart: document.getElementById("chart"),
@@ -23,6 +27,38 @@ const elements = {
     strategySelect: document.getElementById("strategy"),
     meanReversionSection: document.getElementById("mean-reversion-params"),
     breakoutSection: document.getElementById("breakout-params"),
+    vcpSection: document.getElementById("vcp-params"),
+    scanRunButton: document.getElementById("scan-run-button"),
+    scanTimeframe: document.getElementById("scan-timeframe"),
+    scanMaxCandidates: document.getElementById("scan-max-candidates"),
+    scanSymbolsInput: document.getElementById("scan-symbols"),
+    scanSummaryTimeframe: document.getElementById("scan-summary-timeframe"),
+    scanSummaryParams: document.getElementById("scan-summary-params"),
+    scanSummarySymbols: document.getElementById("scan-summary-symbols"),
+    scanSummaryTimestamp: document.getElementById("scan-summary-timestamp"),
+    scanWarningsGroup: document.getElementById("scan-warnings-group"),
+    scanWarningsList: document.getElementById("scan-warnings"),
+    globalStatus: document.getElementById("global-status"),
+    fetchTechButton: document.getElementById("fetch-tech-button"),
+    vcpTestForm: document.getElementById("vcp-test-form"),
+    vcpTestStatus: document.getElementById("vcp-test-status"),
+    vcpTestRunButton: document.getElementById("vcp-test-run"),
+    vcpTestSymbols: document.getElementById("vcp-test-symbols"),
+    vcpTestTimeframe: document.getElementById("vcp-test-timeframe"),
+    vcpTestLookback: document.getElementById("vcp-test-lookback"),
+    vcpTestMaxDetections: document.getElementById("vcp-test-max-detections"),
+    vcpTestSummaryWindow: document.getElementById("vcp-test-summary-window"),
+    vcpTestSummaryDetections: document.getElementById("vcp-test-summary-detections"),
+    vcpTestSummaryTimeframe: document.getElementById("vcp-test-summary-timeframe"),
+    vcpTestSummaryParameters: document.getElementById("vcp-test-summary-parameters"),
+    vcpTestTableBody: document.getElementById("vcp-test-table-body"),
+    vcpTestWarningsGroup: document.getElementById("vcp-test-warnings-group"),
+    vcpTestWarningsList: document.getElementById("vcp-test-warnings"),
+    vcpTestSymbolSelect: document.getElementById("vcp-test-symbol-select"),
+    vcpTestDetectionSelect: document.getElementById("vcp-test-detection-select"),
+    vcpTestChart: document.getElementById("vcp-test-chart"),
+    vcpTestChartTitle: document.getElementById("vcp-test-chart-title"),
+    vcpTestVolumeChart: document.getElementById("vcp-test-volume-chart"),
 };
 
 const meanReversionControls = {
@@ -49,14 +85,39 @@ const breakoutControls = {
     holdRangeInputs: document.querySelectorAll("[data-breakout-hold-range]"),
 };
 
+const vcpControls = {
+    trailingToggle: document.getElementById("vcp_use_trailing_range"),
+    trailingInputs: document.querySelectorAll("[data-vcp-trailing-range]"),
+    holdInfiniteToggle: document.getElementById("vcp_hold_infinite"),
+    holdOnlyInfiniteToggle: document.getElementById("vcp_hold_only_infinite"),
+    holdRangeInputs: document.querySelectorAll("[data-vcp-hold-range]"),
+    searchStrategy: document.getElementById("vcp_search_strategy"),
+    annealingInputs: document.querySelectorAll("#vcp-annealing-settings [data-annealing-input]"),
+    annealingSettings: document.getElementById("vcp-annealing-settings"),
+};
+
+const SCAN_OVERRIDE_SELECTOR = "[data-param]";
+const SCAN_TABLE_COLUMNS = 8;
+
 let latestData = null;
+let latestScanResult = null;
+let latestVcpTest = null;
 
 function initialize() {
+    setupTechDataFetch();
+
+    if (pageId === "vcp-scan") {
+        initializeScanPage();
+        return;
+    }
+
     if (!elements.form) {
         return;
     }
     setupMeanReversionControls();
     setupBreakoutControls();
+    setupVcpControls();
+    setupVcpTestSection();
     toggleParameterSections();
 
     elements.form.addEventListener("submit", runBacktest);
@@ -69,7 +130,1091 @@ function initialize() {
         });
     }
 
-    loadAvailableSymbols().then(runBacktest);
+    loadAvailableSymbols();
+}
+
+function setupTechDataFetch() {
+    clearGlobalStatus();
+
+    const button = elements.fetchTechButton;
+    if (!button) {
+        return;
+    }
+    if (!button.dataset.originalLabel) {
+        button.dataset.originalLabel = button.textContent?.trim() || "Fetch Tech Data";
+    }
+    button.addEventListener("click", handleTechDataFetch);
+}
+
+async function handleTechDataFetch(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    const button = elements.fetchTechButton;
+    if (!button || button.disabled) {
+        return;
+    }
+
+    const originalLabel = button.dataset.originalLabel || button.textContent?.trim() || "Fetch Tech Data";
+    button.dataset.originalLabel = originalLabel;
+
+    button.disabled = true;
+    button.textContent = "Fetching…";
+
+    const forceRefresh = !(event?.shiftKey);
+    const statusMessage = forceRefresh
+        ? "Refreshing technology universe and downloading Polygon history…"
+        : "Downloading Polygon history for cached technology universe…";
+    setGlobalStatus(statusMessage, "info");
+
+    try {
+        const response = await fetch("/api/vcp/universe/fetch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ force_refresh_universe: forceRefresh }),
+        });
+
+        if (!response.ok) {
+            const errorMessage = await readErrorMessage(response);
+            throw new Error(errorMessage);
+        }
+
+        const data = await response.json();
+        renderTechFetchResult(data);
+
+        if (pageId === "vcp-scan" && elements.scanSymbolsInput && !elements.scanSymbolsInput.value.trim()) {
+            prefillScanSymbols();
+        }
+    } catch (error) {
+        console.error("Failed to refresh technology-sector data", error);
+        setGlobalStatus(error?.message || "Failed to refresh technology data.", "error");
+    } finally {
+        button.disabled = false;
+        button.textContent = button.dataset.originalLabel || originalLabel;
+    }
+}
+
+function renderTechFetchResult(result) {
+    const totalSymbols = typeof result?.total_symbols === "number" && Number.isFinite(result.total_symbols)
+        ? result.total_symbols
+        : 0;
+    const updatedRows = typeof result?.updated_count === "number" && Number.isFinite(result.updated_count)
+        ? result.updated_count
+        : 0;
+    const updatedMap = result?.updated_symbols && typeof result.updated_symbols === "object"
+        ? result.updated_symbols
+        : {};
+    const updatedSymbols = Object.keys(updatedMap);
+    const updatedSymbolCount = updatedSymbols.length;
+    const skippedSymbols = Array.isArray(result?.skipped_symbols) ? result.skipped_symbols : [];
+    const skippedCount = skippedSymbols.length;
+    const warnings = Array.isArray(result?.warnings)
+        ? result.warnings.filter((message) => typeof message === "string" && message.trim())
+        : [];
+
+    const summaryParts = [];
+    if (totalSymbols) {
+        summaryParts.push(`Universe size: ${totalSymbols} symbol${totalSymbols === 1 ? "" : "s"}.`);
+    }
+
+    if (updatedRows > 0) {
+        const previewSymbols = updatedSymbols.slice(0, 5).join(", ");
+        const previewSuffix = updatedSymbols.length > 5 ? "…" : "";
+        const preview = previewSymbols ? ` (${previewSymbols}${previewSuffix})` : "";
+        summaryParts.push(
+            `Added ${updatedRows} new daily row${updatedRows === 1 ? "" : "s"} across ${updatedSymbolCount} symbol${updatedSymbolCount === 1 ? "" : "s"}${preview}.`,
+        );
+    } else {
+        summaryParts.push("All technology symbols are already up to date.");
+    }
+
+    if (skippedCount) {
+        summaryParts.push(`${skippedCount} symbol${skippedCount === 1 ? "" : "s"} already current.`);
+    }
+
+    if (warnings.length) {
+        summaryParts.push(`Warnings: ${warnings.join(" | ")}`);
+    }
+
+    const level = warnings.length ? "warning" : updatedRows > 0 ? "success" : "info";
+    const message = summaryParts.join(" ").trim();
+    setGlobalStatus(message || "Technology universe refresh complete.", level);
+}
+
+function setGlobalStatus(message, level = "info") {
+    const status = elements.globalStatus;
+    if (!status) {
+        return;
+    }
+    if (!message) {
+        status.textContent = "";
+        status.hidden = true;
+        status.className = "global-status";
+        return;
+    }
+    status.textContent = message;
+    status.className = `global-status ${level}`;
+    status.hidden = false;
+}
+
+function clearGlobalStatus() {
+    setGlobalStatus("");
+}
+
+function initializeScanPage() {
+    if (!elements.scanForm) {
+        return;
+    }
+    if (elements.scanRunButton && !elements.scanRunButton.dataset.originalLabel) {
+        elements.scanRunButton.dataset.originalLabel = elements.scanRunButton.textContent?.trim() || "Run Scan";
+    }
+    elements.scanForm.addEventListener("submit", runScan);
+    resetScanResults();
+    setScanStatus("Choose a preset and run the scan to discover active VCP breakouts.", "info");
+    prefillScanSymbols();
+}
+
+function resetScanResults() {
+    latestScanResult = null;
+    if (elements.scanSummaryTimeframe) {
+        elements.scanSummaryTimeframe.textContent = "–";
+    }
+    if (elements.scanSummaryParams) {
+        elements.scanSummaryParams.textContent = "–";
+    }
+    if (elements.scanSummarySymbols) {
+        elements.scanSummarySymbols.textContent = "0";
+    }
+    if (elements.scanSummaryTimestamp) {
+        elements.scanSummaryTimestamp.textContent = "–";
+    }
+    if (elements.scanTableBody) {
+        elements.scanTableBody.innerHTML = `<tr><td colspan="${SCAN_TABLE_COLUMNS}" class="metric-empty">Run the scan to populate candidates.</td></tr>`;
+    }
+    renderScanWarnings([]);
+}
+
+function setScanStatus(message, level = "info") {
+    if (!elements.scanStatus) {
+        return;
+    }
+    elements.scanStatus.textContent = message;
+    elements.scanStatus.className = `status ${level}`;
+}
+
+async function runScan(event) {
+    if (event) {
+        event.preventDefault();
+    }
+    if (!elements.scanForm) {
+        return;
+    }
+
+    const button = elements.scanRunButton;
+    if (button) {
+        button.disabled = true;
+        if (!button.dataset.originalLabel) {
+            button.dataset.originalLabel = button.textContent?.trim() || "Run Scan";
+        }
+        button.textContent = "Scanning…";
+    }
+
+    setScanStatus("Scanning for VCP breakouts...", "info");
+
+    const payload = buildScanRequest();
+
+    try {
+        const response = await fetch("/api/vcp/scan", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+            const errorMessage = await readErrorMessage(response);
+            throw new Error(errorMessage);
+        }
+
+        const data = await response.json();
+        renderScanResults(data);
+    } catch (error) {
+        console.error("Failed to run VCP scan", error);
+        setScanStatus(error?.message || "Failed to run scan.", "error");
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = button.dataset.originalLabel || "Run Scan";
+        }
+    }
+}
+
+function buildScanRequest() {
+    const timeframe = elements.scanTimeframe?.value || "medium";
+    let maxCandidates = parseInt(elements.scanMaxCandidates?.value || "0", 10);
+    if (!Number.isFinite(maxCandidates) || maxCandidates < 0) {
+        maxCandidates = 0;
+    }
+    const request = {
+        timeframe,
+        max_candidates: maxCandidates,
+    };
+    const symbols = collectScanSymbols();
+    if (symbols.length) {
+        request.symbols = symbols;
+    }
+    const overrides = collectScanOverrides();
+    if (Object.keys(overrides).length) {
+        request.overrides = overrides;
+    }
+    return request;
+}
+
+function collectScanSymbols() {
+    const raw = elements.scanSymbolsInput?.value || "";
+    return Array.from(new Set(parseSymbolList(raw)));
+}
+
+async function prefillScanSymbols() {
+    if (!elements.scanSymbolsInput || elements.scanSymbolsInput.value.trim()) {
+        return;
+    }
+    try {
+        const response = await fetch("/api/vcp/universe");
+        if (!response.ok) {
+            return;
+        }
+        const payload = await response.json();
+        if (Array.isArray(payload.symbols) && payload.symbols.length) {
+            const formatted = payload.symbols.join(", ");
+            elements.scanSymbolsInput.value = formatted;
+            elements.scanSymbolsInput.dataset.prefilled = "true";
+        }
+
+        const initialWarnings = [];
+        if (Array.isArray(payload.missing) && payload.missing.length) {
+            initialWarnings.push(
+                `Missing cached data for ${payload.missing.length} technology-sector symbol${payload.missing.length === 1 ? "" : "s"}.`,
+            );
+        }
+        if (Array.isArray(payload.warnings)) {
+            payload.warnings.forEach((message) => {
+                if (typeof message === "string" && message.trim()) {
+                    initialWarnings.push(message.trim());
+                }
+            });
+        }
+        if (initialWarnings.length) {
+            renderScanWarnings(initialWarnings);
+        }
+    } catch (error) {
+        console.warn("Unable to prefill VCP scan symbols", error);
+    }
+}
+
+function collectScanOverrides() {
+    if (!elements.scanForm) {
+        return {};
+    }
+    const overrides = {};
+    elements.scanForm.querySelectorAll(SCAN_OVERRIDE_SELECTOR).forEach((input) => {
+        const key = input.getAttribute("data-param");
+        if (!key) {
+            return;
+        }
+        const rawValue = typeof input.value === "string" ? input.value.trim() : "";
+        if (!rawValue) {
+            return;
+        }
+        const numeric = Number(rawValue);
+        overrides[key] = Number.isFinite(numeric) ? numeric : rawValue;
+    });
+    return overrides;
+}
+
+function parseSymbolList(raw) {
+    if (typeof raw !== "string" || !raw.trim()) {
+        return [];
+    }
+    return raw
+        .split(/[\s,]+/)
+        .map((token) => token.trim().toUpperCase())
+        .filter(Boolean);
+}
+
+function setupVcpTestSection() {
+    const form = elements.vcpTestForm;
+    if (!form) {
+        return;
+    }
+    if (elements.vcpTestRunButton && !elements.vcpTestRunButton.dataset.originalLabel) {
+        elements.vcpTestRunButton.dataset.originalLabel =
+            elements.vcpTestRunButton.textContent?.trim() || "Find Patterns";
+    }
+    form.addEventListener("submit", runVcpTest);
+    if (elements.vcpTestSymbolSelect) {
+        elements.vcpTestSymbolSelect.addEventListener("change", () => {
+            updateVcpTestDetectionOptions();
+            renderVcpTestCharts();
+        });
+    }
+    if (elements.vcpTestDetectionSelect) {
+        elements.vcpTestDetectionSelect.addEventListener("change", () => {
+            renderVcpTestCharts();
+        });
+    }
+    if (elements.vcpTestTableBody) {
+        elements.vcpTestTableBody.addEventListener("click", handleVcpTestTableClick);
+    }
+}
+
+function buildVcpTestRequest() {
+    let symbols = parseSymbolList(elements.vcpTestSymbols?.value || "");
+    if (!symbols.length && elements.form) {
+        try {
+            symbols = gatherSymbols(new FormData(elements.form));
+        } catch (error) {
+            console.warn("Failed to gather optimization symbols for VCP testing fallback", error);
+        }
+    }
+    if (!symbols.length) {
+        symbols = DEFAULT_SYMBOLS;
+    }
+    const timeframe = (elements.vcpTestTimeframe?.value || "medium").toString().trim().toLowerCase();
+    let lookback = parseFloat(elements.vcpTestLookback?.value || "3");
+    if (!Number.isFinite(lookback) || lookback <= 0) {
+        lookback = 3;
+    }
+    let maxDetections = parseInt(elements.vcpTestMaxDetections?.value || "8", 10);
+    if (!Number.isFinite(maxDetections) || maxDetections <= 0) {
+        maxDetections = 8;
+    }
+    return {
+        symbols,
+        timeframe,
+        lookback_years: lookback,
+        max_detections: maxDetections,
+    };
+}
+
+function setVcpTestStatus(message, level = "info") {
+    const status = elements.vcpTestStatus;
+    if (!status) {
+        return;
+    }
+    status.textContent = message;
+    status.className = `status ${level}`;
+}
+
+async function runVcpTest(event) {
+    if (event) {
+        event.preventDefault();
+    }
+    if (!elements.vcpTestForm) {
+        return;
+    }
+
+    let payload;
+    try {
+        payload = buildVcpTestRequest();
+    } catch (error) {
+        setVcpTestStatus(error?.message || "Unable to build request.", "error");
+        return;
+    }
+
+    const button = elements.vcpTestRunButton;
+    if (button) {
+        if (!button.dataset.originalLabel) {
+            button.dataset.originalLabel = button.textContent?.trim() || "Find Patterns";
+        }
+        button.disabled = true;
+        button.textContent = "Scanning…";
+    }
+
+    setVcpTestStatus("Scanning historical bars for VCP patterns…", "info");
+
+    try {
+        const response = await fetch("/api/vcp/testing", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+            const errorMessage = await readErrorMessage(response);
+            throw new Error(errorMessage);
+        }
+
+        const data = await response.json();
+        const totalDetections = renderVcpTestResults(data);
+        if (totalDetections > 0) {
+            const plural = totalDetections === 1 ? "" : "s";
+            setVcpTestStatus(`Found ${totalDetections} VCP pattern${plural}.`, "success");
+        } else {
+            setVcpTestStatus("No VCP patterns detected in the selected window.", "warning");
+        }
+    } catch (error) {
+        console.error("Failed to run VCP testing scan", error);
+        setVcpTestStatus(error?.message || "Failed to scan for VCP patterns.", "error");
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = button.dataset.originalLabel || "Find Patterns";
+        }
+    }
+}
+
+function renderVcpTestResults(result) {
+    latestVcpTest = result;
+    const symbols = getVcpResultSymbols(result);
+    updateVcpTestSymbolOptions(symbols);
+    const totalDetections = renderVcpTestSummary(result);
+    renderVcpTestTable(result);
+    renderVcpTestWarnings(result);
+    updateVcpTestDetectionOptions();
+    renderVcpTestCharts();
+    return totalDetections;
+}
+
+function getVcpResultSymbols(result) {
+    if (!result) {
+        return [];
+    }
+    if (Array.isArray(result.symbols) && result.symbols.length) {
+        return result.symbols;
+    }
+    if (result.results && typeof result.results === "object") {
+        return Object.keys(result.results);
+    }
+    return [];
+}
+
+function updateVcpTestSymbolOptions(symbolsOverride) {
+    const symbols = Array.isArray(symbolsOverride) ? symbolsOverride : getVcpResultSymbols(latestVcpTest);
+    const select = elements.vcpTestSymbolSelect;
+    if (!select) {
+        return;
+    }
+    const previous = select.value;
+    select.innerHTML = "";
+    if (!symbols.length) {
+        select.disabled = true;
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "No symbols";
+        select.append(option);
+        return;
+    }
+    select.disabled = false;
+    symbols.forEach((symbol) => {
+        const option = document.createElement("option");
+        option.value = symbol;
+        option.textContent = symbol;
+        select.append(option);
+    });
+    const active = symbols.includes(previous) ? previous : symbols[0];
+    select.value = active;
+}
+
+function getActiveVcpTestSymbol() {
+    const symbols = getVcpResultSymbols(latestVcpTest);
+    if (!symbols.length) {
+        return null;
+    }
+    const candidate = elements.vcpTestSymbolSelect?.value;
+    if (candidate && symbols.includes(candidate)) {
+        return candidate;
+    }
+    if (elements.vcpTestSymbolSelect) {
+        elements.vcpTestSymbolSelect.value = symbols[0];
+    }
+    return symbols[0];
+}
+
+function getVcpTestSymbolResult(symbol) {
+    if (!latestVcpTest || !symbol) {
+        return null;
+    }
+    return latestVcpTest.results?.[symbol] || null;
+}
+
+function updateVcpTestDetectionOptions(symbolOverride) {
+    const select = elements.vcpTestDetectionSelect;
+    if (!select) {
+        return;
+    }
+    const symbol = symbolOverride || getActiveVcpTestSymbol();
+    if (elements.vcpTestSymbolSelect && symbol) {
+        elements.vcpTestSymbolSelect.value = symbol;
+    }
+    const result = getVcpTestSymbolResult(symbol);
+    const detections = Array.isArray(result?.detections) ? result.detections : [];
+
+    select.innerHTML = "";
+    if (!detections.length) {
+        select.disabled = true;
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "No detections";
+        select.append(option);
+        return;
+    }
+
+    select.disabled = false;
+    detections.forEach((detection, index) => {
+        const option = document.createElement("option");
+        option.value = String(index);
+        const label = formatDate(detection.breakout_timestamp);
+        const reward = formatNumber(detection.reward_to_risk ?? 0, 2);
+        option.textContent = `${label} · ${reward}R`;
+        select.append(option);
+    });
+    select.value = "0";
+}
+
+function getActiveVcpTestDetectionIndex(symbolResult) {
+    if (!symbolResult || !Array.isArray(symbolResult.detections) || !symbolResult.detections.length) {
+        return -1;
+    }
+    const raw = elements.vcpTestDetectionSelect?.value ?? "0";
+    const index = Number.parseInt(raw, 10);
+    if (Number.isFinite(index) && index >= 0 && index < symbolResult.detections.length) {
+        return index;
+    }
+    return 0;
+}
+
+function renderVcpTestSummary(result) {
+    const symbols = getVcpResultSymbols(result);
+    let totalDetections = 0;
+    let earliest = null;
+    let latest = null;
+    let parameters = null;
+
+    symbols.forEach((symbol) => {
+        const series = result.results?.[symbol];
+        if (!series) {
+            return;
+        }
+        if (Array.isArray(series.detections)) {
+            totalDetections += series.detections.length;
+        }
+        if (!parameters && series.parameters) {
+            parameters = series.parameters;
+        }
+        const window = series.analysis_window;
+        if (window?.start) {
+            const startDate = new Date(window.start);
+            if (!Number.isNaN(startDate.getTime())) {
+                earliest = earliest === null ? startDate.getTime() : Math.min(earliest, startDate.getTime());
+            }
+        }
+        if (window?.end) {
+            const endDate = new Date(window.end);
+            if (!Number.isNaN(endDate.getTime())) {
+                latest = latest === null ? endDate.getTime() : Math.max(latest, endDate.getTime());
+            }
+        }
+    });
+
+    if (elements.vcpTestSummaryDetections) {
+        elements.vcpTestSummaryDetections.textContent = formatNumber(totalDetections, 0);
+    }
+    if (elements.vcpTestSummaryTimeframe) {
+        const timeframe = (result?.timeframe || "").toString().toUpperCase();
+        elements.vcpTestSummaryTimeframe.textContent = timeframe || "–";
+    }
+    if (elements.vcpTestSummaryWindow) {
+        if (earliest !== null && latest !== null) {
+            elements.vcpTestSummaryWindow.textContent = `${formatDate(new Date(earliest).toISOString())} → ${formatDate(
+                new Date(latest).toISOString(),
+            )}`;
+        } else {
+            elements.vcpTestSummaryWindow.textContent = "–";
+        }
+    }
+    if (elements.vcpTestSummaryParameters) {
+        elements.vcpTestSummaryParameters.textContent = formatVcpTestParameterSummary(parameters);
+    }
+
+    return totalDetections;
+}
+
+function formatVcpTestParameterSummary(parameters) {
+    if (!parameters) {
+        return "–";
+    }
+    const parts = [];
+    if (Number.isFinite(parameters.base_lookback_days)) {
+        parts.push(`${parameters.base_lookback_days}d base`);
+    }
+    if (Number.isFinite(parameters.pivot_lookback_days)) {
+        parts.push(`${parameters.pivot_lookback_days}d pivot`);
+    }
+    if (Number.isFinite(parameters.min_contractions)) {
+        parts.push(`≥${parameters.min_contractions} contractions`);
+    }
+    if (Number.isFinite(parameters.max_contraction_pct)) {
+        parts.push(`${formatPercent(parameters.max_contraction_pct, 1)} max drop`);
+    }
+    if (Number.isFinite(parameters.breakout_volume_ratio)) {
+        parts.push(`${formatNumber(parameters.breakout_volume_ratio, 1)}× breakout vol`);
+    }
+    return parts.length ? parts.join(" • ") : "–";
+}
+
+function renderVcpTestTable(result) {
+    if (!elements.vcpTestTableBody) {
+        return;
+    }
+    const rows = [];
+    const symbols = getVcpResultSymbols(result);
+    symbols.forEach((symbol) => {
+        const series = result.results?.[symbol];
+        if (!series) {
+            return;
+        }
+        const detections = Array.isArray(series.detections) ? series.detections : [];
+        detections.forEach((detection, index) => {
+            const breakout = formatDateTime(detection.breakout_timestamp);
+            const entry = formatCurrency(detection.entry_price);
+            const rewardValue = detection.reward_to_risk;
+            const reward = rewardValue === null || rewardValue === undefined || Number.isNaN(rewardValue)
+                ? "–"
+                : `${formatNumber(rewardValue, 2)}R`;
+            const baseRange = `${formatDate(detection.base_start)} → ${formatDate(detection.base_end)}`;
+            rows.push(
+                `<tr data-symbol="${symbol}" data-index="${index}">
+                    <td>${symbol}</td>
+                    <td>${breakout}</td>
+                    <td>${entry}</td>
+                    <td>${reward}</td>
+                    <td>${baseRange}</td>
+                </tr>`,
+            );
+        });
+    });
+
+    if (!rows.length) {
+        elements.vcpTestTableBody.innerHTML =
+            '<tr><td colspan="5" class="metric-empty">Run the test to populate detections.</td></tr>';
+    } else {
+        elements.vcpTestTableBody.innerHTML = rows.join("");
+    }
+    syncVcpTestTableSelection();
+}
+
+function renderVcpTestWarnings(result) {
+    if (!elements.vcpTestWarningsGroup || !elements.vcpTestWarningsList) {
+        return;
+    }
+    const collected = [];
+    if (Array.isArray(result?.warnings)) {
+        collected.push(...result.warnings);
+    }
+    if (Array.isArray(result?.missing)) {
+        result.missing.forEach((item) => {
+            if (!item || !item.symbol) {
+                return;
+            }
+            const reason = item.reason ? ` (${item.reason})` : "";
+            collected.push(`Missing data for ${item.symbol}${reason}`);
+        });
+    }
+    if (result?.results) {
+        Object.entries(result.results).forEach(([symbol, series]) => {
+            if (Array.isArray(series?.warnings)) {
+                series.warnings.forEach((message) => {
+                    if (typeof message === "string" && message.trim()) {
+                        collected.push(`${symbol}: ${message.trim()}`);
+                    }
+                });
+            }
+        });
+    }
+
+    if (!collected.length) {
+        elements.vcpTestWarningsList.innerHTML = "";
+        elements.vcpTestWarningsGroup.hidden = true;
+        return;
+    }
+
+    const uniqueWarnings = Array.from(new Set(collected));
+    elements.vcpTestWarningsList.innerHTML = uniqueWarnings.map((warning) => `<li>${warning}</li>`).join("");
+    elements.vcpTestWarningsGroup.hidden = false;
+}
+
+function handleVcpTestTableClick(event) {
+    const row = event.target?.closest("tr[data-symbol]");
+    if (!row) {
+        return;
+    }
+    const symbol = row.dataset.symbol;
+    const index = row.dataset.index;
+    if (!symbol) {
+        return;
+    }
+    if (elements.vcpTestSymbolSelect) {
+        elements.vcpTestSymbolSelect.value = symbol;
+    }
+    updateVcpTestDetectionOptions(symbol);
+    if (elements.vcpTestDetectionSelect && index !== undefined) {
+        elements.vcpTestDetectionSelect.value = index;
+    }
+    renderVcpTestCharts();
+}
+
+function renderVcpTestCharts() {
+    const symbol = getActiveVcpTestSymbol();
+    if (!elements.vcpTestChart || !elements.vcpTestVolumeChart) {
+        return;
+    }
+    if (!latestVcpTest || !symbol) {
+        Plotly.purge(elements.vcpTestChart);
+        Plotly.purge(elements.vcpTestVolumeChart);
+        if (elements.vcpTestChartTitle) {
+            elements.vcpTestChartTitle.textContent = "VCP Candlestick";
+        }
+        syncVcpTestTableSelection();
+        return;
+    }
+
+    const result = getVcpTestSymbolResult(symbol);
+    if (!result || !Array.isArray(result.candles) || !result.candles.length) {
+        Plotly.purge(elements.vcpTestChart);
+        Plotly.purge(elements.vcpTestVolumeChart);
+        if (elements.vcpTestChartTitle) {
+            elements.vcpTestChartTitle.textContent = `${symbol} Candlestick (no data)`;
+        }
+        syncVcpTestTableSelection();
+        return;
+    }
+
+    const detectionIndex = getActiveVcpTestDetectionIndex(result);
+    const detections = Array.isArray(result.detections) ? result.detections : [];
+    const detection = detectionIndex >= 0 && detectionIndex < detections.length ? detections[detectionIndex] : null;
+
+    if (elements.vcpTestChartTitle) {
+        elements.vcpTestChartTitle.textContent = detection
+            ? `${symbol} Candlestick · Breakout ${formatDate(detection.breakout_timestamp)}`
+            : `${symbol} Candlestick`;
+    }
+
+    const timestamps = result.candles.map((candle) => candle.timestamp);
+    const opens = result.candles.map((candle) => candle.open);
+    const highs = result.candles.map((candle) => candle.high);
+    const lows = result.candles.map((candle) => candle.low);
+    const closes = result.candles.map((candle) => candle.close);
+    const volumes = result.candles.map((candle) => candle.volume);
+
+    const traces = [
+        {
+            type: "candlestick",
+            name: `${symbol} price`,
+            x: timestamps,
+            open: opens,
+            high: highs,
+            low: lows,
+            close: closes,
+            increasing: { line: { color: "#2ecc71" } },
+            decreasing: { line: { color: "#e74c3c" } },
+        },
+    ];
+
+    const shapes = [];
+    const annotations = [];
+
+    if (detection) {
+        shapes.push({
+            type: "rect",
+            xref: "x",
+            yref: "paper",
+            x0: detection.base_start,
+            x1: detection.base_end,
+            y0: 0,
+            y1: 1,
+            fillcolor: "rgba(99, 102, 241, 0.18)",
+            line: { width: 0 },
+            layer: "below",
+        });
+
+        traces.push({
+            type: "scatter",
+            mode: "markers",
+            name: "Breakout",
+            x: [detection.breakout_timestamp],
+            y: [detection.breakout_price],
+            marker: {
+                color: "#f59e0b",
+                size: 10,
+                symbol: "star",
+                line: { color: "#0f172a", width: 1 },
+            },
+        });
+
+        const xExtent = [timestamps[0], timestamps[timestamps.length - 1]];
+        traces.push(createLevelTrace("Entry", detection.entry_price, "#22c55e", xExtent));
+        traces.push(createLevelTrace("Stop", detection.stop_price, "#ef4444", xExtent, "dash"));
+        traces.push(createLevelTrace("Target", detection.target_price, "#3b82f6", xExtent, "dot"));
+
+        annotations.push({
+            x: detection.breakout_timestamp,
+            y: detection.entry_price,
+            text: `${formatNumber(detection.reward_to_risk ?? 0, 2)}R`,
+            showarrow: true,
+            arrowhead: 4,
+            ax: 0,
+            ay: -60,
+            bgcolor: "rgba(15, 23, 42, 0.85)",
+            bordercolor: "#6366f1",
+        });
+    }
+
+    const chartLayout = {
+        margin: { t: 40, r: 10, b: 50, l: 60 },
+        xaxis: { title: "Date", rangeslider: { visible: false } },
+        yaxis: { title: "Price" },
+        legend: { orientation: "h", x: 0, y: 1.1 },
+        dragmode: "pan",
+        hovermode: "x unified",
+    };
+    if (shapes.length) {
+        chartLayout.shapes = shapes;
+    }
+    if (annotations.length) {
+        chartLayout.annotations = annotations;
+    }
+
+    const config = { responsive: true, displaylogo: false };
+    Plotly.newPlot(elements.vcpTestChart, traces, chartLayout, config);
+
+    const volumeTrace = {
+        type: "bar",
+        name: "Volume",
+        x: timestamps,
+        y: volumes,
+        marker: {
+            color: detection ? highlightVolumeColors(result.candles, detection) : "rgba(148, 163, 184, 0.7)",
+        },
+    };
+    const volumeLayout = {
+        margin: { t: 40, r: 10, b: 50, l: 60 },
+        xaxis: { title: "Date" },
+        yaxis: { title: "Volume" },
+        hovermode: "x unified",
+        bargap: 0,
+    };
+    if (detection) {
+        volumeLayout.shapes = [
+            {
+                type: "rect",
+                xref: "x",
+                yref: "paper",
+                x0: detection.base_start,
+                x1: detection.base_end,
+                y0: 0,
+                y1: 1,
+                fillcolor: "rgba(99, 102, 241, 0.18)",
+                line: { width: 0 },
+                layer: "below",
+            },
+        ];
+    }
+
+    Plotly.newPlot(elements.vcpTestVolumeChart, [volumeTrace], volumeLayout, config);
+    syncVcpTestTableSelection();
+}
+
+function createLevelTrace(name, value, color, xExtent, dash = "solid") {
+    return {
+        type: "scatter",
+        mode: "lines",
+        name,
+        x: xExtent,
+        y: [value, value],
+        line: { color, width: 2, dash },
+        hoverinfo: "skip",
+        showlegend: true,
+    };
+}
+
+function highlightVolumeColors(candles, detection) {
+    const baseStart = new Date(detection.base_start).getTime();
+    const baseEnd = new Date(detection.base_end).getTime();
+    return candles.map((candle) => {
+        const ts = new Date(candle.timestamp).getTime();
+        if (!Number.isNaN(ts) && ts >= baseStart && ts <= baseEnd) {
+            return "rgba(99, 102, 241, 0.8)";
+        }
+        return "rgba(148, 163, 184, 0.6)";
+    });
+}
+
+function syncVcpTestTableSelection() {
+    if (!elements.vcpTestTableBody) {
+        return;
+    }
+    const symbol = getActiveVcpTestSymbol();
+    const result = getVcpTestSymbolResult(symbol);
+    const index = getActiveVcpTestDetectionIndex(result);
+    elements.vcpTestTableBody.querySelectorAll("tr[data-symbol]").forEach((row) => {
+        const rowIndex = Number.parseInt(row.dataset.index ?? "-1", 10);
+        if (row.dataset.symbol === symbol && rowIndex === index) {
+            row.classList.add("is-active");
+        } else {
+            row.classList.remove("is-active");
+        }
+    });
+}
+
+async function readErrorMessage(response) {
+    try {
+        const data = await response.clone().json();
+        if (typeof data === "string") {
+            return data;
+        }
+        if (typeof data?.detail === "string") {
+            return data.detail;
+        }
+        if (data?.detail && typeof data.detail === "object") {
+            if (typeof data.detail.message === "string") {
+                return data.detail.message;
+            }
+            return JSON.stringify(data.detail);
+        }
+    } catch (error) {
+        // ignore JSON parse errors
+    }
+    try {
+        const text = await response.text();
+        if (text) {
+            return text;
+        }
+    } catch (error) {
+        // ignore text parse errors
+    }
+    return response.statusText || `Request failed with status ${response.status}`;
+}
+
+function renderScanResults(result) {
+    latestScanResult = result;
+    renderScanSummary(result);
+    renderScanCandidates(result?.candidates);
+    renderScanWarnings(result?.warnings);
+    const candidateCount = Array.isArray(result?.candidates) ? result.candidates.length : 0;
+    const symbolsScanned = Number.isFinite(result?.symbols_scanned) ? result.symbols_scanned : 0;
+    const message = candidateCount
+        ? `Found ${candidateCount} VCP candidate${candidateCount === 1 ? "" : "s"} across ${symbolsScanned} symbol${symbolsScanned === 1 ? "" : "s"}.`
+        : `No VCP breakouts found across ${symbolsScanned} symbol${symbolsScanned === 1 ? "" : "s"}.`;
+    setScanStatus(message, candidateCount ? "success" : "warning");
+}
+
+function renderScanSummary(summary) {
+    if (!summary) {
+        return;
+    }
+    if (elements.scanSummaryTimeframe) {
+        elements.scanSummaryTimeframe.textContent = formatStrategyName(summary.timeframe) || "–";
+    }
+    if (elements.scanSummaryParams) {
+        elements.scanSummaryParams.textContent = summarizeScanParameters(summary.parameters);
+    }
+    if (elements.scanSummarySymbols) {
+        const count = Number.isFinite(summary.symbols_scanned) ? summary.symbols_scanned : 0;
+        elements.scanSummarySymbols.textContent = formatNumber(count, 0);
+    }
+    if (elements.scanSummaryTimestamp) {
+        elements.scanSummaryTimestamp.textContent = formatDateTime(summary.analysis_timestamp);
+    }
+}
+
+function summarizeScanParameters(parameters) {
+    if (!parameters) {
+        return "–";
+    }
+    const parts = [];
+    if (parameters.base_lookback_days !== undefined) {
+        parts.push(`Base ${formatNumber(parameters.base_lookback_days, 0)}d`);
+    }
+    if (parameters.pivot_lookback_days !== undefined) {
+        parts.push(`Pivot ${formatNumber(parameters.pivot_lookback_days, 0)}d`);
+    }
+    if (parameters.min_contractions !== undefined) {
+        parts.push(`Contractions ${formatNumber(parameters.min_contractions, 0)}`);
+    }
+    if (parameters.breakout_buffer_pct !== undefined) {
+        parts.push(`Buffer ${formatPercent(parameters.breakout_buffer_pct)}`);
+    }
+    if (parameters.volume_squeeze_ratio !== undefined) {
+        parts.push(`Squeeze ${formatNumber(parameters.volume_squeeze_ratio)}`);
+    }
+    if (parameters.breakout_volume_ratio !== undefined) {
+        parts.push(`Volume ${formatNumber(parameters.breakout_volume_ratio)}`);
+    }
+    return parts.length ? parts.join(" • ") : "–";
+}
+
+function renderScanCandidates(candidates) {
+    if (!elements.scanTableBody) {
+        return;
+    }
+    if (!Array.isArray(candidates) || !candidates.length) {
+        elements.scanTableBody.innerHTML = `<tr><td colspan="${SCAN_TABLE_COLUMNS}" class="metric-empty">No candidates matched the scan.</td></tr>`;
+        return;
+    }
+
+    const rows = candidates
+        .map((candidate) => {
+            const rewardToRisk = formatNumber(candidate.reward_to_risk, 2);
+            const volume = formatNumber(candidate.volume, 0);
+            const breakoutTimestamp = formatDateTime(candidate.breakout_timestamp);
+            return `
+        <tr>
+          <td>${candidate.symbol || ""}</td>
+          <td>${formatCurrency(candidate.close_price)}</td>
+          <td>${formatCurrency(candidate.entry_price)}</td>
+          <td>${formatCurrency(candidate.stop_price)}</td>
+          <td>${formatCurrency(candidate.target_price)}</td>
+          <td>${rewardToRisk}</td>
+          <td>${volume}</td>
+          <td>${breakoutTimestamp}</td>
+        </tr>
+      `;
+        })
+        .join("");
+    elements.scanTableBody.innerHTML = rows;
+}
+
+function renderScanWarnings(warnings) {
+    if (!elements.scanWarningsGroup || !elements.scanWarningsList) {
+        return;
+    }
+    if (!Array.isArray(warnings) || !warnings.length) {
+        elements.scanWarningsList.innerHTML = "";
+        elements.scanWarningsGroup.hidden = true;
+        return;
+    }
+    elements.scanWarningsList.innerHTML = warnings.map((warning) => `<li>${warning}</li>`).join("");
+    elements.scanWarningsGroup.hidden = false;
+}
+
+function formatDateTime(value) {
+    if (!value) {
+        return "–";
+    }
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) {
+        return value.toString();
+    }
+    return new Intl.DateTimeFormat("en-US", {
+        year: "numeric",
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZone: "UTC",
+        hour12: false,
+    }).format(parsed);
 }
 
 function setupMeanReversionControls() {
@@ -105,6 +1250,58 @@ function setupBreakoutControls() {
             applyHoldState(controls.holdOnlyInfiniteToggle, controls.holdInfiniteToggle, controls.holdRangeInputs);
         });
     }
+}
+
+function setupVcpControls() {
+    const controls = vcpControls;
+    createRangeToggle(controls.trailingToggle, controls.trailingInputs);
+    applyHoldState(controls.holdOnlyInfiniteToggle, controls.holdInfiniteToggle, controls.holdRangeInputs);
+    if (controls.holdOnlyInfiniteToggle) {
+        controls.holdOnlyInfiniteToggle.addEventListener("change", () => {
+            applyHoldState(controls.holdOnlyInfiniteToggle, controls.holdInfiniteToggle, controls.holdRangeInputs);
+        });
+    }
+
+    initializeVcpSearchControls();
+}
+
+function initializeVcpSearchControls() {
+    const controls = vcpControls;
+    if (!controls.searchStrategy) {
+        return;
+    }
+
+    const annealingInputs = Array.from(controls.annealingInputs || []);
+    const updateVisibility = () => {
+        const strategy = controls.searchStrategy.value;
+        const isAnnealing = strategy === "annealing";
+        if (controls.annealingSettings) {
+            controls.annealingSettings.style.display = isAnnealing ? "grid" : "none";
+        }
+        annealingInputs.forEach((input) => {
+            input.disabled = !isAnnealing;
+            if (!isAnnealing) {
+                input.dataset.previousValue = input.value;
+                const defaultValue = input.dataset.defaultValue;
+                if (defaultValue !== undefined) {
+                    input.value = defaultValue;
+                } else if (input.type === "number") {
+                    input.value = "";
+                }
+            } else if (input.dataset.previousValue !== undefined) {
+                const restored = input.dataset.previousValue;
+                if (restored !== undefined && restored !== null && restored !== "") {
+                    input.value = restored;
+                } else if (input.dataset.defaultValue !== undefined) {
+                    input.value = input.dataset.defaultValue;
+                }
+                delete input.dataset.previousValue;
+            }
+        });
+    };
+
+    controls.searchStrategy.addEventListener("change", updateVisibility);
+    updateVisibility();
 }
 
 function applyStopRangeState(controls) {
@@ -167,6 +1364,9 @@ function toggleParameterSections() {
     if (elements.breakoutSection) {
         elements.breakoutSection.style.display = strategy === STRATEGY_BREAKOUT ? "" : "none";
     }
+    if (elements.vcpSection) {
+        elements.vcpSection.style.display = strategy === STRATEGY_VCP ? "" : "none";
+    }
     if (elements.strategySelect && elements.strategySelect.tagName !== "SELECT") {
         elements.strategySelect.value = strategy;
     }
@@ -224,6 +1424,20 @@ function parseFloatOr(value, fallback) {
     return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function ensureStepIncrement(value, increment, label) {
+    if (!Number.isFinite(value)) {
+        throw new Error(`${label} must be a number.`);
+    }
+    if (value <= 0) {
+        throw new Error(`${label} must be greater than zero.`);
+    }
+    const scaled = value / increment;
+    const rounded = Math.round(scaled * 1e6) / 1e6;
+    if (Math.abs(rounded - Math.round(rounded)) > 1e-6) {
+        throw new Error(`${label} must be in ${increment.toFixed(1)} increments.`);
+    }
+}
+
 async function runBacktest(event) {
     if (event) {
         event.preventDefault();
@@ -250,8 +1464,11 @@ async function runBacktest(event) {
 
     if (strategy === STRATEGY_MEAN_REVERSION) {
         payload.parameter_spec = buildMeanReversionSpec(formData);
-    } else {
+    } else if (strategy === STRATEGY_BREAKOUT) {
         payload.breakout_spec = buildBreakoutSpec(formData);
+    } else if (strategy === STRATEGY_VCP) {
+        payload.vcp_spec = buildVcpSpec(formData);
+        Object.assign(payload, buildVcpSearchSettings(formData));
     }
 
     setStatus("Searching for optimal parameters...", "info");
@@ -440,6 +1657,159 @@ function buildBreakoutSpec(formData) {
     return spec;
 }
 
+function buildVcpSpec(formData) {
+    const toInt = (name, fallback) => parseIntOr(formData.get(name), fallback);
+    const toFloat = (name, fallback) => parseFloatOr(formData.get(name), fallback);
+    const toPercent = (name, fallback) => parseFloatOr(formData.get(name), fallback) / 100;
+
+    const bufferStepRaw = parseFloatOr(formData.get("vcp_buffer_step"), 0.2);
+    ensureStepIncrement(bufferStepRaw, 0.1, "Breakout buffer step");
+
+    const squeezeStepRaw = parseFloatOr(formData.get("vcp_squeeze_step"), 0.2);
+    ensureStepIncrement(squeezeStepRaw, 0.1, "Volume squeeze step");
+
+    const breakoutVolumeStepRaw = parseFloatOr(formData.get("vcp_breakout_volume_step"), 0.3);
+    ensureStepIncrement(breakoutVolumeStepRaw, 0.1, "Breakout volume step");
+
+    const stopStepRaw = parseFloatOr(formData.get("vcp_stop_r_step"), 0.2);
+    ensureStepIncrement(stopStepRaw, 0.1, "Stop-loss step");
+
+    const targetStepRaw = parseFloatOr(formData.get("vcp_target_r_step"), 0.5);
+    ensureStepIncrement(targetStepRaw, 0.1, "Profit target step");
+
+    const trailingStepRaw = parseFloatOr(formData.get("vcp_trailing_r_step"), 0.1);
+    ensureStepIncrement(trailingStepRaw, 0.1, "Trailing stop step");
+
+    const holdOnlyInfinite = formData.has("vcp_hold_only_infinite");
+    const holdRange = holdOnlyInfinite
+        ? {
+            minimum: 0,
+            maximum: 0,
+            step: 1,
+            include_infinite: true,
+            only_infinite: true,
+        }
+        : {
+            minimum: toInt("vcp_hold_min", 0),
+            maximum: toInt("vcp_hold_max", 0),
+            step: toInt("vcp_hold_step", 1),
+            include_infinite: formData.has("vcp_hold_infinite"),
+        };
+
+    const trailingEnabled = formData.has("vcp_use_trailing_range");
+    const trailingRange = trailingEnabled
+        ? {
+            minimum: toFloat("vcp_trailing_r_min", 1.5),
+            maximum: toFloat("vcp_trailing_r_max", 1.5),
+            step: trailingStepRaw,
+        }
+        : null;
+
+    const spec = {
+        base_lookback_days: {
+            minimum: toInt("vcp_base_lookback_min", 45),
+            maximum: toInt("vcp_base_lookback_max", 60),
+            step: toInt("vcp_base_lookback_step", 15),
+        },
+        pivot_lookback_days: {
+            minimum: toInt("vcp_pivot_lookback_min", 4),
+            maximum: toInt("vcp_pivot_lookback_max", 6),
+            step: toInt("vcp_pivot_lookback_step", 2),
+        },
+        min_contractions: {
+            minimum: toInt("vcp_min_contractions_min", 3),
+            maximum: toInt("vcp_min_contractions_max", 3),
+            step: toInt("vcp_min_contractions_step", 1),
+        },
+        max_contraction_pct: {
+            minimum: toPercent("vcp_max_contraction_min", 12),
+            maximum: toPercent("vcp_max_contraction_max", 16),
+            step: toPercent("vcp_max_contraction_step", 4),
+        },
+        contraction_decay: {
+            minimum: toPercent("vcp_decay_min", 60),
+            maximum: toPercent("vcp_decay_max", 80),
+            step: toPercent("vcp_decay_step", 20),
+        },
+        breakout_buffer_pct: {
+            minimum: toPercent("vcp_buffer_min", 0.1),
+            maximum: toPercent("vcp_buffer_max", 0.3),
+            step: bufferStepRaw / 100,
+        },
+        volume_squeeze_ratio: {
+            minimum: toFloat("vcp_squeeze_min", 0.65),
+            maximum: toFloat("vcp_squeeze_max", 0.85),
+            step: squeezeStepRaw,
+        },
+        breakout_volume_ratio: {
+            minimum: toFloat("vcp_breakout_volume_min", 1.8),
+            maximum: toFloat("vcp_breakout_volume_max", 2.1),
+            step: breakoutVolumeStepRaw,
+        },
+        volume_lookback_days: {
+            minimum: toInt("vcp_volume_lookback_min", 18),
+            maximum: toInt("vcp_volume_lookback_max", 24),
+            step: toInt("vcp_volume_lookback_step", 6),
+        },
+        trend_ma_period: {
+            minimum: toInt("vcp_trend_ma_min", 45),
+            maximum: toInt("vcp_trend_ma_max", 60),
+            step: toInt("vcp_trend_ma_step", 15),
+        },
+        stop_loss_r_multiple: {
+            minimum: toFloat("vcp_stop_r_min", 0.9),
+            maximum: toFloat("vcp_stop_r_max", 1.1),
+            step: stopStepRaw,
+        },
+        profit_target_r_multiple: {
+            minimum: toFloat("vcp_target_r_min", 2.0),
+            maximum: toFloat("vcp_target_r_max", 2.5),
+            step: targetStepRaw,
+        },
+        trailing_stop_r_multiple: trailingRange,
+        include_no_trailing_stop: formData.has("vcp_include_no_trailing"),
+        max_hold_days: holdRange,
+        target_position_pct: {
+            minimum: toInt("vcp_target_pct_min", 15),
+            maximum: toInt("vcp_target_pct_max", 15),
+            step: toInt("vcp_target_pct_step", 1),
+        },
+        lot_size: toInt("vcp_lot_size", 1),
+        cash_reserve_pct: Math.max(0, Math.min(toPercent("vcp_cash_reserve", 10), 0.95)),
+    };
+
+    return spec;
+}
+
+function buildVcpSearchSettings(formData) {
+    const rawStrategy = (formData.get("vcp_search_strategy") || "grid").toString().trim().toLowerCase();
+    const iterations = Math.max(1, parseIntOr(formData.get("vcp_search_iterations"), 150));
+
+    if (rawStrategy !== "annealing") {
+        // Only override defaults for annealing; grid search parameters are ignored by the backend.
+        return {};
+    }
+
+    const initialTemp = Math.max(0.0001, parseFloatOr(formData.get("vcp_initial_temperature"), 1.0));
+    const coolingRate = parseFloatOr(formData.get("vcp_cooling_rate"), 0.95);
+    const seedValue = formData.get("vcp_random_seed");
+    const hasSeed = typeof seedValue === "string" && seedValue.trim() !== "";
+    const seed = hasSeed ? parseIntOr(seedValue, 0) : null;
+
+    const settings = {
+        vcp_search_strategy: "annealing",
+        vcp_search_iterations: iterations,
+        vcp_initial_temperature: initialTemp,
+        vcp_cooling_rate: Number.isFinite(coolingRate) && coolingRate > 0 && coolingRate < 1 ? coolingRate : 0.95,
+    };
+
+    if (hasSeed && Number.isFinite(seed) && seed >= 0) {
+        settings.vcp_random_seed = seed;
+    }
+
+    return settings;
+}
+
 function updateChartSymbolOptions(symbols) {
     elements.symbolSelect.innerHTML = "";
     symbols.forEach((symbol) => {
@@ -513,6 +1883,7 @@ function renderCandles(symbol, result) {
 
     const candles = result.candles;
     const buys = result.buy_signals || [];
+    const annotations = Array.isArray(result.annotations) ? result.annotations : [];
 
     const traceCandles = {
         type: "candlestick",
@@ -540,6 +1911,9 @@ function renderCandles(symbol, result) {
         },
     };
 
+    const annotationTraces = buildAnnotationTraces(annotations);
+    const shapes = buildAnnotationShapes(annotations, candles);
+
     const layout = {
         margin: { t: 40, r: 10, b: 50, l: 60 },
         xaxis: { title: "Date", rangeslider: { visible: false } },
@@ -548,9 +1922,20 @@ function renderCandles(symbol, result) {
         dragmode: "pan",
         hovermode: "x unified",
     };
+    if (shapes.length) {
+        layout.shapes = shapes;
+    }
 
     const config = { responsive: true, displaylogo: false };
-    const traces = buys.length ? [traceCandles, traceBuys] : [traceCandles];
+    const traces = [traceCandles];
+    if (buys.length) {
+        traces.push(traceBuys);
+    }
+    annotationTraces.forEach((trace) => {
+        if (trace.x.length) {
+            traces.push(trace);
+        }
+    });
     Plotly.newPlot(elements.chart, traces, layout, config);
     elements.chartTitle.textContent = `${symbol} Candlestick`;
 }
@@ -783,13 +2168,13 @@ function formatCurrency(value) {
     return formatter.format(value);
 }
 
-function formatPercent(value) {
+function formatPercent(value, digits = 2) {
     if (value === undefined || value === null || Number.isNaN(value)) {
         return "–";
     }
     const formatter = new Intl.NumberFormat("en-US", {
         style: "percent",
-        maximumFractionDigits: 2,
+        maximumFractionDigits: digits,
     });
     return formatter.format(value);
 }
@@ -835,6 +2220,9 @@ function getSelectedStrategy() {
     if (pageId === "breakout") {
         return STRATEGY_BREAKOUT;
     }
+    if (pageId === "vcp") {
+        return STRATEGY_VCP;
+    }
     return STRATEGY_MEAN_REVERSION;
 }
 
@@ -845,6 +2233,118 @@ function formatStrategyName(value) {
         .split("_")
         .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
         .join(" ");
+}
+
+function buildAnnotationTraces(annotations) {
+    const entryTrace = {
+        type: "scatter",
+        mode: "markers",
+        name: "Plan Entry",
+        x: [],
+        y: [],
+        marker: { color: "#f4d03f", size: 9, symbol: "diamond", line: { width: 1, color: "#1f2a44" } },
+        hovertemplate: "Entry %{y:.2f}<extra></extra>",
+    };
+    const stopTrace = {
+        type: "scatter",
+        mode: "markers",
+        name: "Plan Stop",
+        x: [],
+        y: [],
+        marker: { color: "#e74c3c", size: 8, symbol: "x", line: { width: 1, color: "#1f2a44" } },
+        hovertemplate: "Stop %{y:.2f}<extra></extra>",
+    };
+    const targetTrace = {
+        type: "scatter",
+        mode: "markers",
+        name: "Plan Target",
+        x: [],
+        y: [],
+        marker: { color: "#27ae60", size: 8, symbol: "triangle-up", line: { width: 1, color: "#1f2a44" } },
+        hovertemplate: "Target %{y:.2f}<extra></extra>",
+    };
+
+    annotations.forEach((note) => {
+        const ts = note.timestamp;
+        if (!ts) {
+            return;
+        }
+        if (note.entry !== null && note.entry !== undefined) {
+            entryTrace.x.push(ts);
+            entryTrace.y.push(note.entry);
+        }
+        if (note.stop !== null && note.stop !== undefined) {
+            stopTrace.x.push(ts);
+            stopTrace.y.push(note.stop);
+        }
+        if (note.target !== null && note.target !== undefined) {
+            targetTrace.x.push(ts);
+            targetTrace.y.push(note.target);
+        }
+    });
+
+    return [entryTrace, stopTrace, targetTrace];
+}
+
+function buildAnnotationShapes(annotations, candles) {
+    if (!Array.isArray(annotations) || !annotations.length || !Array.isArray(candles) || !candles.length) {
+        return [];
+    }
+    const lastTimestamp = candles[candles.length - 1]?.timestamp;
+    const shapes = [];
+
+    annotations.forEach((note) => {
+        const ts = note.timestamp;
+        if (!ts) {
+            return;
+        }
+        const x1 = lastTimestamp && lastTimestamp > ts ? lastTimestamp : ts;
+        if (note.entry !== null && note.entry !== undefined) {
+            shapes.push(
+                horizontalShape(ts, x1, note.entry, "#f4d03f", "solid"),
+            );
+        }
+        if (note.stop !== null && note.stop !== undefined) {
+            shapes.push(
+                horizontalShape(ts, x1, note.stop, "#e74c3c", "dot"),
+            );
+        }
+        if (note.target !== null && note.target !== undefined) {
+            shapes.push(
+                horizontalShape(ts, x1, note.target, "#27ae60", "dot"),
+            );
+        }
+        if (note.resistance !== null && note.resistance !== undefined) {
+            shapes.push(
+                horizontalShape(ts, x1, note.resistance, "#8e44ad", "dash"),
+            );
+        }
+        if (note.base_low !== null && note.base_low !== undefined) {
+            shapes.push(
+                horizontalShape(ts, x1, note.base_low, "#2c3e50", "dash"),
+            );
+        }
+    });
+
+    return shapes;
+}
+
+function horizontalShape(x0, x1, y, color, dash) {
+    return {
+        type: "line",
+        x0,
+        x1,
+        y0: y,
+        y1: y,
+        xref: "x",
+        yref: "y",
+        line: {
+            color,
+            width: 1.5,
+            dash,
+        },
+        opacity: 0.85,
+    };
 }
 
 document.addEventListener("DOMContentLoaded", initialize);

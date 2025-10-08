@@ -2,6 +2,7 @@
 
 from .breakout import BreakoutConfig, BreakoutPattern, BreakoutStrategy
 from .mean_reversion import MeanReversionConfig, MeanReversionStrategy
+from .vcp import VCPConfig, VCPStrategy
 
 __all__ = [
     "BreakoutConfig",
@@ -9,4 +10,6 @@ __all__ = [
     "BreakoutStrategy",
     "MeanReversionConfig",
     "MeanReversionStrategy",
+    "VCPConfig",
+    "VCPStrategy",
 ]

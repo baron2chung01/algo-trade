@@ -160,3 +160,59 @@ def test_optimize_endpoint_supports_only_infinite_hold(tmp_path):
     aapl = body["results"]["AAPL"]
     best_hold = aapl["optimization"]["best_parameters"]["max_hold_days"]
     assert best_hold == 0
+
+
+def test_optimize_endpoint_supports_vcp(tmp_path):
+    store = ParquetBarStore(tmp_path / "bars")
+    start_date = date.today() - timedelta(days=4 * 365)
+    series = _generate_prices(900, 120.0)
+    store.save("AAPL", "1d", _build_bars(series, start_date))
+
+    client = TestClient(create_app())
+    payload = {
+        "symbols": ["AAPL"],
+        "store_path": str(store.root),
+        "strategy": "vcp",
+        "auto_fetch": False,
+        "limit": 120,
+        "vcp_spec": {
+            "base_lookback_days": {"minimum": 50, "maximum": 50, "step": 1},
+            "pivot_lookback_days": {"minimum": 3, "maximum": 3, "step": 1},
+            "min_contractions": {"minimum": 3, "maximum": 3, "step": 1},
+            "max_contraction_pct": {"minimum": 0.12, "maximum": 0.12, "step": 0.01},
+            "contraction_decay": {"minimum": 0.7, "maximum": 0.7, "step": 0.05},
+            "breakout_buffer_pct": {"minimum": 0.002, "maximum": 0.002, "step": 0.001},
+            "volume_squeeze_ratio": {"minimum": 0.7, "maximum": 0.7, "step": 0.05},
+            "breakout_volume_ratio": {"minimum": 1.5, "maximum": 1.5, "step": 0.1},
+            "volume_lookback_days": {"minimum": 20, "maximum": 20, "step": 1},
+            "trend_ma_period": {"minimum": 50, "maximum": 50, "step": 1},
+            "stop_loss_r_multiple": {"minimum": 1.0, "maximum": 1.0, "step": 0.1},
+            "profit_target_r_multiple": {"minimum": 2.5, "maximum": 2.5, "step": 0.1},
+            "trailing_stop_r_multiple": {"minimum": 1.5, "maximum": 1.5, "step": 0.1},
+            "include_no_trailing_stop": True,
+            "max_hold_days": {
+                "minimum": 45,
+                "maximum": 45,
+                "step": 1,
+                "include_infinite": False,
+                "only_infinite": False,
+            },
+            "target_position_pct": {"minimum": 10, "maximum": 10, "step": 1},
+            "lot_size": 5,
+            "cash_reserve_pct": 0.1,
+        },
+    }
+
+    response = client.post("/api/optimize", json=payload)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["strategy"] == "vcp"
+    assert body["symbols"] == ["AAPL"]
+    aapl = body["results"]["AAPL"]
+    assert aapl["strategy"] == "vcp"
+    assert "annotations" in aapl
+    assert isinstance(aapl["annotations"], list)
+    assert "optimization" in aapl
+    params = aapl["optimization"]["best_parameters"]
+    assert params["base_lookback_days"] == 50
+    assert params["pivot_lookback_days"] == 3

@@ -1,0 +1,136 @@
+{% extends "base.html" %} {% block title %}VCP Scan{% endblock %} {% block page_id %}vcp-scan{% endblock %} {% block footer_scripts %}
+<script src="/static/app.js" type="module" defer></script>
+{% endblock %} {% block content %}
+<div class="page-intro">
+  <h1>VCP Scan</h1>
+  <p class="page-intro__subtitle">
+    Sweep the NASDAQ technology sector for Volatility Contraction Pattern breakouts. Choose a preset timeframe and optionally override key thresholds to tailor the scan.
+  </p>
+</div>
+<section class="layout">
+  <aside class="control-panel">
+    <form id="scan-form" class="control-form">
+      <div class="form-section">
+        <h2 class="form-section-title">Universe</h2>
+        <p>Defaults to the latest NASDAQ technology sector membership available via Polygon. Provide comma-separated tickers to override.</p>
+        <label>
+          Custom symbols
+          <textarea id="scan-symbols" name="symbols" rows="3" placeholder="e.g. AAPL, TSLA, NVDA"></textarea>
+        </label>
+      </div>
+
+      <div class="form-section">
+        <h2 class="form-section-title">Scan Preset</h2>
+        <label>
+          Timeframe
+          <select id="scan-timeframe" name="timeframe">
+            <option value="short">Short (45-day base)</option>
+            <option value="medium" selected>Medium (60-day base)</option>
+            <option value="long">Long (75-day base)</option>
+          </select>
+        </label>
+        <label>
+          Max candidates
+          <input id="scan-max-candidates" name="max_candidates" type="number" min="0" step="1" value="50" />
+        </label>
+      </div>
+
+      <div class="form-section">
+        <h2 class="form-section-title">Overrides (optional)</h2>
+        <p>Leave blank to keep the preset values.</p>
+        <div class="form-grid">
+          <label>
+            Max contraction (decimal)
+            <input type="number" step="0.01" min="0" max="1" data-param="max_contraction_pct" placeholder="0.16" />
+          </label>
+          <label>
+            Contraction decay
+            <input type="number" step="0.01" min="0" max="1" data-param="contraction_decay" placeholder="0.72" />
+          </label>
+          <label>
+            Breakout buffer (decimal)
+            <input type="number" step="0.0005" min="0" max="0.02" data-param="breakout_buffer_pct" placeholder="0.0025" />
+          </label>
+          <label>
+            Volume squeeze ratio
+            <input type="number" step="0.01" min="0" max="1" data-param="volume_squeeze_ratio" placeholder="0.78" />
+          </label>
+          <label>
+            Breakout volume ratio
+            <input type="number" step="0.05" min="0" max="5" data-param="breakout_volume_ratio" placeholder="2.1" />
+          </label>
+          <label>
+            Stop loss (R)
+            <input type="number" step="0.05" min="0" max="5" data-param="stop_loss_r_multiple" placeholder="1.0" />
+          </label>
+          <label>
+            Profit target (R)
+            <input type="number" step="0.1" min="0" max="10" data-param="profit_target_r_multiple" placeholder="2.5" />
+          </label>
+          <label>
+            Trailing stop (R)
+            <input type="number" step="0.1" min="0" max="5" data-param="trailing_stop_r_multiple" placeholder="1.5" />
+          </label>
+        </div>
+      </div>
+
+      <button id="scan-run-button" type="submit">Run Scan</button>
+    </form>
+
+    <div class="status" id="scan-status"></div>
+  </aside>
+
+  <section class="metrics" id="scan-results">
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Scan Summary</h3>
+        <span id="scan-summary-timestamp" class="metric-window"></span>
+      </div>
+      <div class="metric-grid">
+        <div class="metric-card">
+          <span class="metric-label">Timeframe</span>
+          <span class="metric-value" id="scan-summary-timeframe">–</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">Parameters evaluated</span>
+          <span class="metric-value" id="scan-summary-params">–</span>
+        </div>
+        <div class="metric-card">
+          <span class="metric-label">Symbols scanned</span>
+          <span class="metric-value" id="scan-summary-symbols">–</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Breakout Candidates</h3>
+      </div>
+      <div class="table-scroll">
+        <table id="scan-table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Close</th>
+              <th>Entry</th>
+              <th>Stop</th>
+              <th>Target</th>
+              <th>Reward/Risk</th>
+              <th>Volume</th>
+              <th>Breakout</th>
+            </tr>
+          </thead>
+          <tbody id="scan-table-body"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="metric-group" id="scan-warnings-group" hidden>
+      <div class="metric-group-header">
+        <h3>Warnings</h3>
+      </div>
+      <ul id="scan-warnings" class="warning-list"></ul>
+    </div>
+  </section>
+</section>
+{% endblock %}
