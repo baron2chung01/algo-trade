@@ -25,6 +25,15 @@
           Extra symbols
           <input id="extra-symbols" name="extra_symbols" type="text" placeholder="e.g. AAPL, TSLA" />
         </label>
+        <div class="universe-actions">
+          <button type="button" class="button-secondary" id="use-nasdaq-universe">Use NASDAQ Universe</button>
+          <button type="button" class="button-secondary" id="use-snp100-universe">Use S&amp;P 100 Universe</button>
+          <label class="file-input">
+            <span>Import watchlist (CSV)</span>
+            <input id="universe-import" type="file" accept=".csv,text/csv" />
+          </label>
+        </div>
+        <p class="form-help" id="universe-message">Select cached symbols or import a list to define your universe.</p>
       </div>
 
       <div class="form-section">

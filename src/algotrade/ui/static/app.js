@@ -2,6 +2,9 @@ const DEFAULT_SYMBOLS = ["AAPL", "MSFT"];
 const STRATEGY_MEAN_REVERSION = "mean_reversion";
 const STRATEGY_BREAKOUT = "breakout";
 const STRATEGY_VCP = "vcp";
+const STRATEGY_MOMENTUM = "momentum";
+const MOMENTUM_MODE_BACKTEST = "backtest";
+const MOMENTUM_MODE_OPTIMIZE = "optimize";
 
 const pageId = document.body?.dataset?.page || "";
 
@@ -24,6 +27,10 @@ const elements = {
     chartTitle: document.getElementById("chart-title"),
     availableSymbolsSelect: document.getElementById("available-symbols"),
     extraSymbolsInput: document.getElementById("extra-symbols"),
+    useNasdaqButton: document.getElementById("use-nasdaq-universe"),
+    useSnp100Button: document.getElementById("use-snp100-universe"),
+    universeImportInput: document.getElementById("universe-import"),
+    universeMessage: document.getElementById("universe-message"),
     strategySelect: document.getElementById("strategy"),
     meanReversionSection: document.getElementById("mean-reversion-params"),
     breakoutSection: document.getElementById("breakout-params"),
@@ -61,6 +68,31 @@ const elements = {
     vcpTestChart: document.getElementById("vcp-test-chart"),
     vcpTestChartTitle: document.getElementById("vcp-test-chart-title"),
     vcpTestVolumeChart: document.getElementById("vcp-test-volume-chart"),
+};
+
+const momentumElements = {
+    form: document.getElementById("momentum-form"),
+    status: document.getElementById("momentum-status"),
+    runButton: document.getElementById("momentum-run"),
+    parameterList: document.getElementById("momentum-parameter-list"),
+    parameterTemplate: document.getElementById("momentum-parameter-template"),
+    addParameterButton: document.getElementById("add-parameter-set"),
+    paperMetrics: document.getElementById("momentum-paper-metrics"),
+    trainingMetrics: document.getElementById("momentum-training-metrics"),
+    paperWindow: document.getElementById("momentum-paper-window"),
+    trainingWindow: document.getElementById("momentum-training-window"),
+    rankingTableBody: document.querySelector("#momentum-ranking-table tbody"),
+    warningContainer: document.getElementById("momentum-warnings"),
+    warningList: document.getElementById("momentum-warning-list"),
+    resultSelect: document.getElementById("momentum-result-select"),
+    trainingChart: document.getElementById("momentum-training-chart"),
+    paperChart: document.getElementById("momentum-paper-chart"),
+    tradeTableBody: document.querySelector("#momentum-trade-table tbody"),
+    tradesSection: document.getElementById("momentum-trades-section"),
+    modeRadios: document.querySelectorAll("input[name='momentum_mode']"),
+    modeMessage: document.getElementById("momentum-mode-message"),
+    optimizeSection: document.getElementById("momentum-optimize-section"),
+    parameterSection: document.getElementById("momentum-parameter-section"),
 };
 
 const meanReversionControls = {
@@ -110,12 +142,21 @@ const SCAN_CRITERIA_LABELS = {
 let latestData = null;
 let latestScanResult = null;
 let latestVcpTest = null;
+let latestMomentum = null;
+let currentMomentumMode = MOMENTUM_MODE_BACKTEST;
+let currentUniverseSource = "cache";
+let currentUniverseSymbols = [...DEFAULT_SYMBOLS];
 
 function initialize() {
     setupTechDataFetch();
 
     if (pageId === "vcp-scan") {
         initializeScanPage();
+        return;
+    }
+
+    if (pageId === "momentum") {
+        initializeMomentumPage();
         return;
     }
 
@@ -126,6 +167,7 @@ function initialize() {
     setupBreakoutControls();
     setupVcpControls();
     setupVcpTestSection();
+    setupUniverseControls();
     toggleParameterSections();
 
     elements.form.addEventListener("submit", runBacktest);
@@ -309,6 +351,828 @@ function initializeScanPage() {
     resetScanResults();
     setScanStatus("Choose a preset and run the scan to discover active VCP breakouts.", "info");
     prefillScanSymbols();
+}
+
+function initializeMomentumPage() {
+    if (!momentumElements.form) {
+        return;
+    }
+
+    setupUniverseControls();
+    loadAvailableSymbols();
+    prefillMomentumDates();
+    setMomentumStatus("Configure the experiment window and run to evaluate momentum rotations.", "info");
+
+    if (momentumElements.runButton && !momentumElements.runButton.dataset.backtestLabel) {
+        const defaultLabel = momentumElements.runButton.textContent?.trim() || "Run Momentum Backtest";
+        momentumElements.runButton.dataset.backtestLabel = defaultLabel;
+        momentumElements.runButton.dataset.optimizeLabel =
+            momentumElements.runButton.dataset.optimizeLabel || "Optimize Momentum Parameters";
+    }
+
+    momentumElements.form.addEventListener("submit", runMomentumExperiment);
+
+    if (momentumElements.addParameterButton) {
+        momentumElements.addParameterButton.addEventListener("click", () => {
+            addMomentumParameterSet();
+        });
+    }
+
+    if (momentumElements.resultSelect) {
+        momentumElements.resultSelect.addEventListener("change", (event) => {
+            renderMomentumSelection(event.target.value);
+        });
+    }
+
+    if (momentumElements.modeRadios && momentumElements.modeRadios.length) {
+        momentumElements.modeRadios.forEach((radio) => {
+            radio.addEventListener("change", () => {
+                applyMomentumMode(readMomentumMode());
+            });
+        });
+    }
+
+    applyMomentumMode(readMomentumMode());
+}
+
+function prefillMomentumDates() {
+    const trainingStartInput = document.getElementById("training-start");
+    const trainingEndInput = document.getElementById("training-end");
+    const paperStartInput = document.getElementById("paper-start");
+    const paperEndInput = document.getElementById("paper-end");
+
+    if (!trainingStartInput || !trainingEndInput || !paperStartInput || !paperEndInput) {
+        return;
+    }
+
+    if (trainingStartInput.value && trainingEndInput.value && paperStartInput.value && paperEndInput.value) {
+        return;
+    }
+
+    const today = new Date();
+    const paperEnd = today;
+    const paperStart = new Date(paperEnd);
+    paperStart.setDate(paperStart.getDate() - 365);
+
+    const trainingEnd = new Date(paperStart);
+    trainingEnd.setDate(trainingEnd.getDate() - 1);
+
+    const trainingStart = new Date(trainingEnd);
+    trainingStart.setDate(trainingStart.getDate() - 730);
+
+    if (!trainingStartInput.value) {
+        trainingStartInput.value = formatDateForInput(trainingStart);
+    }
+    if (!trainingEndInput.value) {
+        trainingEndInput.value = formatDateForInput(trainingEnd);
+    }
+    if (!paperStartInput.value) {
+        paperStartInput.value = formatDateForInput(paperStart);
+    }
+    if (!paperEndInput.value) {
+        paperEndInput.value = formatDateForInput(paperEnd);
+    }
+}
+
+function formatDateForInput(date) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+        return "";
+    }
+    return date.toISOString().split("T")[0];
+}
+
+function readMomentumMode(formData = null) {
+    if (formData instanceof FormData) {
+        const value = formData.get("momentum_mode");
+        return value === MOMENTUM_MODE_OPTIMIZE ? MOMENTUM_MODE_OPTIMIZE : MOMENTUM_MODE_BACKTEST;
+    }
+    const radios = momentumElements.modeRadios ? Array.from(momentumElements.modeRadios) : [];
+    const checked = radios.find((radio) => radio.checked);
+    return checked?.value === MOMENTUM_MODE_OPTIMIZE ? MOMENTUM_MODE_OPTIMIZE : MOMENTUM_MODE_BACKTEST;
+}
+
+function updateMomentumRunButtonLabel(mode) {
+    if (!momentumElements.runButton) {
+        return;
+    }
+    const backtestLabel = momentumElements.runButton.dataset.backtestLabel || "Run Momentum Backtest";
+    const optimizeLabel = momentumElements.runButton.dataset.optimizeLabel || "Optimize Momentum Parameters";
+    momentumElements.runButton.textContent = mode === MOMENTUM_MODE_OPTIMIZE ? optimizeLabel : backtestLabel;
+}
+
+function updateMomentumModeStatus(mode) {
+    if (!momentumElements.modeMessage) {
+        return;
+    }
+    if (mode === MOMENTUM_MODE_OPTIMIZE) {
+        momentumElements.modeMessage.textContent =
+            "Optimizer samples smart ranges across the S&P 100 (or your overrides) and surfaces the top-performing configuration.";
+    } else {
+        momentumElements.modeMessage.textContent =
+            "Define one or more parameter sets to backtest directly against your selected universe.";
+    }
+}
+
+function applyMomentumMode(mode) {
+    currentMomentumMode = mode === MOMENTUM_MODE_OPTIMIZE ? MOMENTUM_MODE_OPTIMIZE : MOMENTUM_MODE_BACKTEST;
+    const isOptimize = currentMomentumMode === MOMENTUM_MODE_OPTIMIZE;
+
+    toggleMomentumSection(momentumElements.optimizeSection, isOptimize);
+    toggleMomentumSection(momentumElements.parameterSection, !isOptimize);
+    if (momentumElements.addParameterButton) {
+        momentumElements.addParameterButton.hidden = isOptimize;
+    }
+
+    if (!isOptimize) {
+        ensureMomentumParameterSet();
+    }
+
+    updateMomentumRunButtonLabel(currentMomentumMode);
+    updateMomentumModeStatus(currentMomentumMode);
+
+    if (currentMomentumMode === MOMENTUM_MODE_OPTIMIZE) {
+        setMomentumStatus("Ready to optimize S&P 100 momentum parameters.", "info");
+    } else {
+        setMomentumStatus("Configure parameter sets and run to evaluate momentum rotations.", "info");
+    }
+}
+
+function toggleMomentumSection(section, shouldShow) {
+    if (!section) {
+        return;
+    }
+    section.hidden = !shouldShow;
+    section.classList.toggle("is-hidden", !shouldShow);
+}
+
+function ensureMomentumParameterSet() {
+    if (!momentumElements.parameterList) {
+        return;
+    }
+    const existing = momentumElements.parameterList.querySelectorAll("[data-parameter-card]");
+    if (!existing.length) {
+        addMomentumParameterSet();
+    } else {
+        updateMomentumParameterIndexes();
+    }
+}
+
+function addMomentumParameterSet(prefill = null) {
+    if (!momentumElements.parameterTemplate || !momentumElements.parameterList) {
+        return null;
+    }
+    const fragment = momentumElements.parameterTemplate.content.cloneNode(true);
+    const card = fragment.querySelector("[data-parameter-card]");
+    if (!card) {
+        return null;
+    }
+
+    card.dataset.parameterId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const inputs = card.querySelectorAll("[data-field]");
+    inputs.forEach((input) => {
+        const field = input.dataset.field;
+        if (prefill && Object.prototype.hasOwnProperty.call(prefill, field)) {
+            input.value = prefill[field];
+        }
+    });
+
+    const removeButton = card.querySelector("[data-remove-parameter]");
+    if (removeButton) {
+        removeButton.addEventListener("click", () => {
+            card.remove();
+            updateMomentumParameterIndexes();
+        });
+    }
+
+    momentumElements.parameterList.append(card);
+    updateMomentumParameterIndexes();
+    return card;
+}
+
+function updateMomentumParameterIndexes() {
+    if (!momentumElements.parameterList) {
+        return;
+    }
+    const cards = Array.from(momentumElements.parameterList.querySelectorAll("[data-parameter-card]"));
+    cards.forEach((card, index) => {
+        const indexLabel = card.querySelector("[data-parameter-index]");
+        if (indexLabel) {
+            indexLabel.textContent = index + 1;
+        }
+        const removeButton = card.querySelector("[data-remove-parameter]");
+        if (removeButton) {
+            removeButton.hidden = cards.length <= 1;
+        }
+    });
+}
+
+function collectMomentumParameters() {
+    if (!momentumElements.parameterList) {
+        return [];
+    }
+    const cards = Array.from(momentumElements.parameterList.querySelectorAll("[data-parameter-card]"));
+    if (!cards.length) {
+        addMomentumParameterSet();
+        return collectMomentumParameters();
+    }
+
+    const labels = {
+        lookback_days: "Lookback days",
+        skip_days: "Skip days",
+        rebalance_days: "Rebalance days",
+        max_positions: "Max positions",
+        lot_size: "Lot size",
+        cash_reserve_pct: "Cash reserve",
+        min_momentum: "Minimum momentum",
+        volatility_window: "Volatility window",
+        volatility_exponent: "Volatility exponent",
+    };
+
+    const results = cards.map((card) => {
+        const getInput = (name) => card.querySelector(`[data-field="${name}"]`);
+        const getLabel = (name) => labels[name] || name;
+
+        const readInt = (name, fallback, min = Number.NEGATIVE_INFINITY) => {
+            const input = getInput(name);
+            const value = parseIntOr(input?.value ?? "", fallback);
+            if (!Number.isFinite(value)) {
+                throw new Error(`${getLabel(name)} must be a number.`);
+            }
+            if (value < min) {
+                throw new Error(`${getLabel(name)} must be at least ${min}.`);
+            }
+            return value;
+        };
+
+        const readFloat = (name, fallback, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY) => {
+            const input = getInput(name);
+            const value = parseFloatOr(input?.value ?? "", fallback);
+            if (!Number.isFinite(value)) {
+                throw new Error(`${getLabel(name)} must be a number.`);
+            }
+            if (value < min) {
+                throw new Error(`${getLabel(name)} must be at least ${min}.`);
+            }
+            if (value > max) {
+                throw new Error(`${getLabel(name)} must be at most ${max}.`);
+            }
+            return value;
+        };
+
+        const lookback = readInt("lookback_days", 126, 1);
+        const skip = readInt("skip_days", 21, 0);
+        const rebalance = readInt("rebalance_days", 21, 1);
+        const maxPositions = readInt("max_positions", 5, 1);
+        const lotSize = readInt("lot_size", 1, 1);
+        const reservePercent = readFloat("cash_reserve_pct", 5, 0, 95);
+        const minMomentum = readFloat("min_momentum", 0);
+        const volatilityWindow = readInt("volatility_window", 20, 1);
+        const volatilityExponent = readFloat("volatility_exponent", 1, 0);
+
+        const cashReservePct = Math.max(0, Math.min(reservePercent / 100, 0.95));
+
+        return {
+            lookback_days: lookback,
+            skip_days: skip,
+            rebalance_days: rebalance,
+            max_positions: maxPositions,
+            lot_size: lotSize,
+            cash_reserve_pct: Number(cashReservePct.toFixed(4)),
+            min_momentum: minMomentum,
+            volatility_window: volatilityWindow,
+            volatility_exponent: Number(volatilityExponent.toFixed(4)),
+        };
+    });
+
+    return results;
+}
+
+function readMomentumBaseConfig(formData) {
+    const initialCash = parseFloatOr(formData.get("initial_cash"), 100000);
+    if (!Number.isFinite(initialCash) || initialCash <= 0) {
+        throw new Error("Initial cash must be a positive number.");
+    }
+
+    const trainingStartRaw = formData.get("training_start");
+    const trainingEndRaw = formData.get("training_end");
+    const paperStartRaw = formData.get("paper_start");
+    const paperEndRaw = formData.get("paper_end");
+
+    if (!trainingStartRaw || !trainingEndRaw || !paperStartRaw || !paperEndRaw) {
+        throw new Error("Please provide complete training and paper windows.");
+    }
+
+    const trainingStart = new Date(trainingStartRaw);
+    const trainingEnd = new Date(trainingEndRaw);
+    const paperStart = new Date(paperStartRaw);
+    const paperEnd = new Date(paperEndRaw);
+
+    if (Number.isNaN(trainingStart.getTime()) || Number.isNaN(trainingEnd.getTime())) {
+        throw new Error("Training window contains invalid dates.");
+    }
+
+    if (Number.isNaN(paperStart.getTime()) || Number.isNaN(paperEnd.getTime())) {
+        throw new Error("Paper window contains invalid dates.");
+    }
+
+    if (trainingStart >= trainingEnd) {
+        throw new Error("Training start must be before training end.");
+    }
+
+    if (paperStart >= paperEnd) {
+        throw new Error("Paper start must be before paper end.");
+    }
+
+    if (trainingEnd >= paperStart) {
+        throw new Error("Training window must end before the paper window starts.");
+    }
+
+    const storePath = (formData.get("store_path") || "").toString().trim();
+
+    return {
+        initialCash,
+        trainingStart,
+        trainingEnd,
+        paperStart,
+        paperEnd,
+        autoFetch: formData.has("auto_fetch"),
+        storePath,
+    };
+}
+
+function buildMomentumBacktestRequest(formData) {
+    const base = readMomentumBaseConfig(formData);
+    const symbols = gatherSymbols(formData);
+    if (!symbols.length) {
+        throw new Error("Please select at least one symbol.");
+    }
+
+    const parameters = collectMomentumParameters();
+    if (!parameters.length) {
+        throw new Error("At least one parameter set is required.");
+    }
+
+    const payload = {
+        symbols,
+        initial_cash: base.initialCash,
+        training_window: [formatDateForInput(base.trainingStart), formatDateForInput(base.trainingEnd)],
+        paper_window: [formatDateForInput(base.paperStart), formatDateForInput(base.paperEnd)],
+        parameters,
+        auto_fetch: base.autoFetch,
+    };
+
+    if (base.storePath) {
+        payload.store_path = base.storePath;
+    }
+
+    return payload;
+}
+
+function buildMomentumOptimizationSpec(formData) {
+    const readIntField = (name, fallback, min = Number.NEGATIVE_INFINITY) => {
+        const value = parseIntOr(formData.get(name), fallback);
+        if (!Number.isFinite(value)) {
+            throw new Error(`${name.replace(/_/g, " ")} must be a number.`);
+        }
+        if (value < min) {
+            throw new Error(`${name.replace(/_/g, " ")} must be at least ${min}.`);
+        }
+        return value;
+    };
+
+    const readFloatField = (name, fallback, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY) => {
+        const value = parseFloatOr(formData.get(name), fallback);
+        if (!Number.isFinite(value)) {
+            throw new Error(`${name.replace(/_/g, " ")} must be a number.`);
+        }
+        if (value < min) {
+            throw new Error(`${name.replace(/_/g, " ")} must be at least ${min}.`);
+        }
+        if (value > max) {
+            throw new Error(`${name.replace(/_/g, " ")} must be less than or equal to ${max}.`);
+        }
+        return value;
+    };
+
+    const buildIntRange = (prefix, defaults, label, minValue = 1) => {
+        const minimum = readIntField(`${prefix}_min`, defaults.min, minValue);
+        const maximum = readIntField(`${prefix}_max`, defaults.max, minValue);
+        const step = readIntField(`${prefix}_step`, defaults.step, 1);
+        if (maximum < minimum) {
+            throw new Error(`${label} max must be greater than or equal to min.`);
+        }
+        return { minimum, maximum, step };
+    };
+
+    const buildFloatRange = (prefix, defaults, label, minValue, maxValue) => {
+        const minimum = readFloatField(`${prefix}_min`, defaults.min, minValue, maxValue);
+        const maximum = readFloatField(`${prefix}_max`, defaults.max, minValue, maxValue);
+        const step = readFloatField(`${prefix}_step`, defaults.step, 1e-6, maxValue - minValue + defaults.step);
+        if (maximum < minimum) {
+            throw new Error(`${label} max must be greater than or equal to min.`);
+        }
+        if (step <= 0) {
+            throw new Error(`${label} step must be positive.`);
+        }
+        return { minimum, maximum, step };
+    };
+
+    return {
+        lookback_days: buildIntRange("opt_lookback", { min: 84, max: 189, step: 21 }, "Lookback days"),
+        skip_days: buildIntRange("opt_skip", { min: 5, max: 21, step: 8 }, "Skip days", 0),
+        rebalance_days: buildIntRange("opt_rebalance", { min: 10, max: 30, step: 10 }, "Rebalance days", 1),
+        max_positions: buildIntRange("opt_positions", { min: 4, max: 10, step: 2 }, "Max positions", 1),
+        lot_size: buildIntRange("opt_lot", { min: 1, max: 1, step: 1 }, "Lot size", 1),
+        cash_reserve_pct: buildFloatRange("opt_cash", { min: 0.05, max: 0.15, step: 0.05 }, "Cash reserve", 0, 0.95),
+        min_momentum: buildFloatRange("opt_min_momentum", { min: 0.0, max: 0.15, step: 0.05 }, "Minimum momentum", -10, 10),
+        volatility_window: buildIntRange("opt_vol_window", { min: 15, max: 35, step: 5 }, "Volatility window", 1),
+        volatility_exponent: buildFloatRange("opt_vol_exp", { min: 0.8, max: 1.2, step: 0.2 }, "Volatility exponent", 0, 5),
+        max_combinations: readIntField("opt_max_combinations", 60, 1),
+    };
+}
+
+function buildMomentumOptimizeRequest(formData) {
+    const base = readMomentumBaseConfig(formData);
+    const spec = buildMomentumOptimizationSpec(formData);
+    const lookbackYears = parseFloatOr(formData.get("opt_lookback_years"), 3.0);
+    if (!Number.isFinite(lookbackYears) || lookbackYears <= 0) {
+        throw new Error("Lookback years must be a positive number.");
+    }
+
+    const { symbols, explicit } = gatherExplicitSymbols(formData);
+
+    const payload = {
+        initial_cash: base.initialCash,
+        training_window: [formatDateForInput(base.trainingStart), formatDateForInput(base.trainingEnd)],
+        paper_window: [formatDateForInput(base.paperStart), formatDateForInput(base.paperEnd)],
+        auto_fetch: base.autoFetch,
+        lookback_years: Number(lookbackYears.toFixed(3)),
+        parameter_spec: {
+            ...spec,
+            max_combinations: spec.max_combinations,
+        },
+    };
+
+    if (base.storePath) {
+        payload.store_path = base.storePath;
+    }
+
+    if (explicit) {
+        payload.symbols = symbols;
+        payload.use_snp100 = false;
+    } else {
+        payload.use_snp100 = true;
+    }
+
+    return payload;
+}
+
+function buildMomentumRequest(mode, formData) {
+    if (mode === MOMENTUM_MODE_OPTIMIZE) {
+        return {
+            endpoint: "/api/momentum/optimize",
+            payload: buildMomentumOptimizeRequest(formData),
+        };
+    }
+    return {
+        endpoint: "/api/momentum/run",
+        payload: buildMomentumBacktestRequest(formData),
+    };
+}
+
+async function runMomentumExperiment(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    if (!momentumElements.form) {
+        return;
+    }
+
+    const formData = new FormData(momentumElements.form);
+
+    const mode = readMomentumMode(formData);
+    let request;
+    try {
+        request = buildMomentumRequest(mode, formData);
+    } catch (error) {
+        setMomentumStatus(error?.message || "Unable to build momentum request.", "error");
+        return;
+    }
+
+    const runningMessage = mode === MOMENTUM_MODE_OPTIMIZE
+        ? "Optimizing momentum parameters…"
+        : "Running momentum experiment…";
+    setMomentumStatus(runningMessage, "info");
+    disableMomentumRunButton(true);
+
+    try {
+        const response = await fetch(request.endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(request.payload),
+        });
+
+        if (!response.ok) {
+            const errorMessage = await readErrorMessage(response);
+            throw new Error(errorMessage);
+        }
+
+        const data = await response.json();
+        renderMomentumResult(data);
+
+        if (mode === MOMENTUM_MODE_OPTIMIZE) {
+            const evaluatedCount = Array.isArray(data?.results) ? data.results.length : data?.evaluated_count ?? 0;
+            const bestLabel = data?.best?.label || data?.rankings?.[0]?.label || "best";
+            setMomentumStatus(
+                `Evaluated ${evaluatedCount} candidate set${evaluatedCount === 1 ? "" : "s"}. Top configuration: ${bestLabel}.`,
+                "success",
+            );
+        } else {
+            const symbolCount = Array.isArray(data?.symbols) ? data.symbols.length : request.payload.symbols.length;
+            const parameterCount = Array.isArray(data?.results) ? data.results.length : request.payload.parameters.length;
+            setMomentumStatus(
+                `Evaluated ${parameterCount} parameter set${parameterCount === 1 ? "" : "s"} across ${symbolCount} symbol${symbolCount === 1 ? "" : "s"}.`,
+                "success",
+            );
+        }
+    } catch (error) {
+        console.error("Failed to run momentum experiment", error);
+        setMomentumStatus(error?.message || "Failed to run momentum experiment.", "error");
+    } finally {
+        disableMomentumRunButton(false);
+    }
+}
+
+function setMomentumStatus(message, level = "info") {
+    if (!momentumElements.status) {
+        return;
+    }
+    momentumElements.status.textContent = message;
+    momentumElements.status.className = `status ${level}`;
+}
+
+function disableMomentumRunButton(disabled) {
+    if (momentumElements.runButton) {
+        momentumElements.runButton.disabled = disabled;
+    }
+}
+
+function renderMomentumResult(data) {
+    const resultList = Array.isArray(data?.results) ? data.results : [];
+    const resultMap = new Map();
+    resultList.forEach((item) => {
+        if (item?.label) {
+            resultMap.set(item.label, item);
+        }
+    });
+
+    latestMomentum = {
+        ...data,
+        results: resultList,
+        resultMap,
+    };
+
+    const paperWindow = data?.paper_window || null;
+    const trainingWindow = data?.training_window || null;
+
+    if (momentumElements.paperWindow) {
+        momentumElements.paperWindow.textContent = paperWindow ? `Window: ${formatRange(paperWindow)}` : "";
+    }
+    if (momentumElements.trainingWindow) {
+        momentumElements.trainingWindow.textContent = trainingWindow ? `Window: ${formatRange(trainingWindow)}` : "";
+    }
+
+    updateMomentumResultOptions(resultList);
+    renderMomentumRankingTable(Array.isArray(data?.rankings) ? data.rankings : []);
+    renderMomentumWarnings(data?.warnings, data?.fetched_symbols);
+
+    const defaultLabel = data?.best?.label
+        || (data?.rankings && data.rankings[0]?.label)
+        || (resultList[0]?.label ?? "");
+    renderMomentumSelection(defaultLabel);
+}
+
+function updateMomentumResultOptions(results) {
+    if (!momentumElements.resultSelect) {
+        return;
+    }
+    const options = Array.isArray(results) ? results : [];
+    if (!options.length) {
+        momentumElements.resultSelect.innerHTML = "";
+        return;
+    }
+    momentumElements.resultSelect.innerHTML = options
+        .map((item) => `<option value="${item.label}">${item.label}</option>`)
+        .join("");
+}
+
+function renderMomentumSelection(label) {
+    if (!latestMomentum || !latestMomentum.results?.length) {
+        renderMomentumMetrics(null);
+        renderMomentumCharts(null);
+        renderMomentumTrades(null);
+        if (momentumElements.resultSelect) {
+            momentumElements.resultSelect.value = "";
+        }
+        return;
+    }
+
+    const selected = label && latestMomentum.resultMap?.has(label)
+        ? latestMomentum.resultMap.get(label)
+        : latestMomentum.results[0];
+
+    if (!selected) {
+        renderMomentumMetrics(null);
+        renderMomentumCharts(null);
+        renderMomentumTrades(null);
+        return;
+    }
+
+    if (momentumElements.resultSelect && label && momentumElements.resultSelect.value !== label) {
+        momentumElements.resultSelect.value = label;
+    }
+
+    renderMomentumMetrics(selected);
+    renderMomentumCharts(selected);
+    renderMomentumTrades(selected);
+}
+
+function renderMomentumMetrics(result) {
+    const trainingMetrics = result?.training_metrics || null;
+    const paperMetrics = result?.paper_metrics || null;
+
+    renderMetricCards(momentumElements.paperMetrics, buildMetricRows(paperMetrics));
+    renderMetricCards(momentumElements.trainingMetrics, buildMetricRows(trainingMetrics));
+}
+
+function renderMomentumWarnings(warnings, fetchedSymbols) {
+    if (!momentumElements.warningContainer || !momentumElements.warningList) {
+        return;
+    }
+    const warningItems = [];
+
+    if (Array.isArray(fetchedSymbols) && fetchedSymbols.length) {
+        warningItems.push(`Auto-downloaded Polygon data for: ${fetchedSymbols.join(", ")}.`);
+    }
+
+    if (Array.isArray(warnings)) {
+        warnings.forEach((warning) => {
+            if (!warning) {
+                return;
+            }
+            if (typeof warning === "string") {
+                warningItems.push(warning);
+            } else if (warning.label && warning.reason) {
+                warningItems.push(`${warning.label}: ${warning.reason}`);
+            } else if (warning.reason) {
+                warningItems.push(warning.reason);
+            }
+        });
+    }
+
+    if (!warningItems.length) {
+        momentumElements.warningList.innerHTML = "";
+        momentumElements.warningContainer.hidden = true;
+        return;
+    }
+
+    momentumElements.warningList.innerHTML = warningItems
+        .map((message) => `<li>${message}</li>`)
+        .join("");
+    momentumElements.warningContainer.hidden = false;
+}
+
+function renderMomentumRankingTable(rankings) {
+    if (!momentumElements.rankingTableBody) {
+        return;
+    }
+    if (!Array.isArray(rankings) || !rankings.length) {
+        momentumElements.rankingTableBody.innerHTML =
+            '<tr><td colspan="5" class="metric-empty">No parameter sets evaluated yet.</td></tr>';
+        return;
+    }
+
+    momentumElements.rankingTableBody.innerHTML = rankings
+        .map((row) => {
+            const sharpe = formatNumber(row.paper_sharpe ?? row.paper_metrics?.sharpe_ratio ?? 0, 2);
+            const totalReturn = formatPercent(row.paper_total_return ?? 0);
+            const cagr = formatPercent(row.paper_cagr ?? 0);
+            const drawdown = formatPercent(-(Math.abs(row.paper_max_drawdown ?? 0)));
+            return `
+        <tr>
+          <td>${row.label || "Set"}</td>
+          <td>${sharpe}</td>
+          <td>${totalReturn}</td>
+          <td>${cagr}</td>
+          <td>${drawdown}</td>
+        </tr>
+      `;
+        })
+        .join("");
+}
+
+function renderMomentumCharts(result) {
+    if (!momentumElements.trainingChart || !momentumElements.paperChart) {
+        return;
+    }
+
+    const trainingCurve = Array.isArray(result?.training_equity_curve) ? result.training_equity_curve : [];
+    const paperCurve = Array.isArray(result?.paper_equity_curve) ? result.paper_equity_curve : [];
+
+    if (!trainingCurve.length) {
+        Plotly.purge(momentumElements.trainingChart);
+    } else {
+        const trainingTrace = {
+            type: "scatter",
+            mode: "lines",
+            name: "Training Equity",
+            x: trainingCurve.map((point) => point.timestamp),
+            y: trainingCurve.map((point) => point.equity),
+            line: { color: "#6366f1", width: 3 },
+        };
+        Plotly.newPlot(
+            momentumElements.trainingChart,
+            [trainingTrace],
+            {
+                margin: { t: 40, r: 10, b: 50, l: 60 },
+                xaxis: { title: "Date" },
+                yaxis: { title: "Equity" },
+                hovermode: "x unified",
+            },
+            { responsive: true, displaylogo: false },
+        );
+    }
+
+    if (!paperCurve.length) {
+        Plotly.purge(momentumElements.paperChart);
+    } else {
+        const paperTrace = {
+            type: "scatter",
+            mode: "lines",
+            name: "Paper Equity",
+            x: paperCurve.map((point) => point.timestamp),
+            y: paperCurve.map((point) => point.equity),
+            line: { color: "#22c55e", width: 3 },
+        };
+        Plotly.newPlot(
+            momentumElements.paperChart,
+            [paperTrace],
+            {
+                margin: { t: 40, r: 10, b: 50, l: 60 },
+                xaxis: { title: "Date" },
+                yaxis: { title: "Equity" },
+                hovermode: "x unified",
+            },
+            { responsive: true, displaylogo: false },
+        );
+    }
+}
+
+function renderMomentumTrades(result) {
+    if (!momentumElements.tradeTableBody) {
+        return;
+    }
+
+    const trades = [];
+    if (Array.isArray(result?.training_trades)) {
+        trades.push(...result.training_trades);
+    }
+    if (Array.isArray(result?.paper_trades)) {
+        trades.push(...result.paper_trades);
+    }
+
+    trades.sort((a, b) => {
+        const tsA = new Date(a.timestamp || 0).getTime();
+        const tsB = new Date(b.timestamp || 0).getTime();
+        return tsA - tsB;
+    });
+
+    if (!trades.length) {
+        momentumElements.tradeTableBody.innerHTML =
+            '<tr><td colspan="5" class="metric-empty">No trades recorded for the selected set.</td></tr>';
+        return;
+    }
+
+    momentumElements.tradeTableBody.innerHTML = trades
+        .map((trade) => {
+            const timestamp = formatDateTime(trade.timestamp);
+            const symbol = (trade.symbol || "").toUpperCase();
+            const quantity = formatNumber(trade.quantity, 0);
+            const price = formatCurrency(trade.price);
+            const cashAfter = formatCurrency(trade.cash_after);
+            return `
+        <tr>
+          <td>${timestamp}</td>
+          <td>${symbol}</td>
+          <td>${quantity}</td>
+          <td>${price}</td>
+          <td>${cashAfter}</td>
+        </tr>
+      `;
+        })
+        .join("");
 }
 
 function resetScanResults() {
@@ -1575,12 +2439,367 @@ function toggleParameterSections() {
     }
 }
 
+function setupUniverseControls() {
+    if (elements.useNasdaqButton && !elements.useNasdaqButton.dataset.bound) {
+        elements.useNasdaqButton.addEventListener("click", handleUseNasdaqUniverse);
+        elements.useNasdaqButton.dataset.bound = "true";
+    }
+    if (elements.useSnp100Button && !elements.useSnp100Button.dataset.bound) {
+        elements.useSnp100Button.addEventListener("click", handleUseSnp100Universe);
+        elements.useSnp100Button.dataset.bound = "true";
+    }
+    if (elements.universeImportInput && !elements.universeImportInput.dataset.bound) {
+        elements.universeImportInput.addEventListener("change", handleUniverseImport);
+        elements.universeImportInput.dataset.bound = "true";
+    }
+}
+
+function setUniverseMessage(message, level = "info") {
+    const helper = elements.universeMessage;
+    if (!helper) {
+        return;
+    }
+    if (!message) {
+        helper.textContent = "";
+        helper.dataset.level = "";
+        helper.hidden = true;
+        return;
+    }
+    helper.textContent = message;
+    helper.dataset.level = level;
+    helper.hidden = false;
+}
+
+function updateAvailableSymbolOptions(symbols, options = {}) {
+    const select = elements.availableSymbolsSelect;
+    if (!select) {
+        currentUniverseSymbols = [];
+        return;
+    }
+
+    const uniqueSymbols = Array.isArray(symbols)
+        ? Array.from(
+            new Set(
+                symbols
+                    .map((symbol) => (typeof symbol === "string" ? symbol.trim().toUpperCase() : ""))
+                    .filter(Boolean),
+            ),
+        )
+        : [];
+
+    select.innerHTML = "";
+    currentUniverseSymbols = uniqueSymbols;
+
+    const selectAll = Boolean(options.selectAll);
+    const selectedList = Array.isArray(options.selected)
+        ? options.selected.map((symbol) => symbol.toUpperCase())
+        : [];
+    const selectedSet = new Set(selectAll ? uniqueSymbols : selectedList);
+
+    uniqueSymbols.forEach((symbol) => {
+        const option = document.createElement("option");
+        option.value = symbol;
+        option.textContent = symbol;
+        if (selectAll || selectedSet.has(symbol) || (!selectAll && !selectedSet.size && DEFAULT_SYMBOLS.includes(symbol))) {
+            option.selected = true;
+        }
+        select.append(option);
+    });
+
+    if (options.source) {
+        select.dataset.source = options.source;
+    }
+}
+
+function applyUniverseSymbols(symbols, { selectAll = false, source = "cache" } = {}) {
+    updateAvailableSymbolOptions(symbols, { selectAll });
+    currentUniverseSource = source;
+    if (elements.availableSymbolsSelect) {
+        elements.availableSymbolsSelect.dataset.source = source;
+    }
+}
+
+async function handleUseNasdaqUniverse(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    const button = elements.useNasdaqButton;
+    if (button && button.disabled) {
+        return;
+    }
+
+    setUniverseMessage("Loading NASDAQ universe…", "info");
+
+    let restoreLabel = "";
+    if (button) {
+        restoreLabel = button.dataset.originalLabel || button.textContent?.trim() || "Use NASDAQ Universe";
+        button.dataset.originalLabel = restoreLabel;
+        button.disabled = true;
+        button.textContent = "Loading…";
+    }
+
+    try {
+        const response = await fetch("/api/universe/nasdaq");
+        if (!response.ok) {
+            const detail = await readErrorMessage(response);
+            throw new Error(detail || `Request failed with status ${response.status}`);
+        }
+        const payload = await response.json();
+        const symbols = Array.isArray(payload?.symbols) ? payload.symbols : [];
+        if (!symbols.length) {
+            throw new Error("NASDAQ universe returned no symbols.");
+        }
+        applyUniverseSymbols(symbols, { selectAll: true, source: "nasdaq" });
+        if (elements.extraSymbolsInput) {
+            elements.extraSymbolsInput.value = "";
+        }
+        const missingCount = Array.isArray(payload?.missing) ? payload.missing.length : 0;
+        const warnings = Array.isArray(payload?.warnings) ? payload.warnings : [];
+        const summaryParts = [`Loaded ${symbols.length} NASDAQ symbol${symbols.length === 1 ? "" : "s"}.`];
+        if (missingCount) {
+            summaryParts.push(
+                `${missingCount} symbol${missingCount === 1 ? "" : "s"} will be fetched from Polygon when the test runs.`,
+            );
+        }
+        warnings.forEach((warning) => {
+            if (typeof warning === "string" && warning.trim()) {
+                summaryParts.push(warning.trim());
+            }
+        });
+        const level = missingCount > 0 || warnings.length > 0 ? "warning" : "success";
+        setUniverseMessage(summaryParts.join(" "), level);
+    } catch (error) {
+        console.error("Failed to load NASDAQ universe", error);
+        setUniverseMessage(error?.message || "Unable to load NASDAQ universe.", "error");
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = restoreLabel || "Use NASDAQ Universe";
+        }
+    }
+}
+
+async function handleUseSnp100Universe(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    const button = elements.useSnp100Button;
+    if (button && button.disabled) {
+        return;
+    }
+
+    setUniverseMessage("Loading S&P 100 universe…", "info");
+
+    let restoreLabel = "";
+    if (button) {
+        restoreLabel = button.dataset.originalLabel || button.textContent?.trim() || "Use S&P 100 Universe";
+        button.dataset.originalLabel = restoreLabel;
+        button.disabled = true;
+        button.textContent = "Loading…";
+    }
+
+    try {
+        const response = await fetch("/api/universe/snp100");
+        if (!response.ok) {
+            const detail = await readErrorMessage(response);
+            throw new Error(detail || `Request failed with status ${response.status}`);
+        }
+        const payload = await response.json();
+        const symbols = Array.isArray(payload?.symbols) ? payload.symbols : [];
+        if (!symbols.length) {
+            throw new Error("S&P 100 universe returned no symbols.");
+        }
+        applyUniverseSymbols(symbols, { selectAll: true, source: "snp100" });
+        if (elements.extraSymbolsInput) {
+            elements.extraSymbolsInput.value = "";
+        }
+        const missingCount = Array.isArray(payload?.missing) ? payload.missing.length : 0;
+        const warnings = Array.isArray(payload?.warnings) ? payload.warnings : [];
+        const summaryParts = [`Loaded ${symbols.length} S&P 100 symbol${symbols.length === 1 ? "" : "s"}.`];
+        if (missingCount) {
+            summaryParts.push(
+                `${missingCount} symbol${missingCount === 1 ? "" : "s"} will be fetched from Polygon when the test runs.`,
+            );
+        }
+        warnings.forEach((warning) => {
+            if (typeof warning === "string" && warning.trim()) {
+                summaryParts.push(warning.trim());
+            }
+        });
+        const level = missingCount > 0 || warnings.length > 0 ? "warning" : "success";
+        setUniverseMessage(summaryParts.join(" "), level);
+    } catch (error) {
+        console.error("Failed to load S&P 100 universe", error);
+        setUniverseMessage(error?.message || "Unable to load S&P 100 universe.", "error");
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = restoreLabel || "Use S&P 100 Universe";
+        }
+    }
+}
+
+async function handleUniverseImport(event) {
+    const input = event?.target;
+    if (!input || input.files?.length !== 1) {
+        return;
+    }
+
+    const file = input.files[0];
+    setUniverseMessage(`Importing symbols from ${file.name}…`, "info");
+
+    try {
+        const text = await file.text();
+        const symbols = parseUniverseCsv(text);
+        if (!symbols.length) {
+            throw new Error("No symbols were detected in the uploaded CSV.");
+        }
+        applyUniverseSymbols(symbols, { selectAll: true, source: "import" });
+        if (elements.extraSymbolsInput) {
+            elements.extraSymbolsInput.value = "";
+        }
+
+        const activeForm = momentumElements.form || elements.form || null;
+        let storePath = "";
+        if (activeForm) {
+            const storeInput = activeForm.querySelector("[name='store_path']");
+            if (storeInput && typeof storeInput.value === "string") {
+                storePath = storeInput.value.trim();
+            }
+        }
+
+        setUniverseMessage(`Imported ${symbols.length} symbol${symbols.length === 1 ? "" : "s"} from ${file.name}. Checking historical coverage…`, "info");
+
+        try {
+            const fetchPayload = {
+                symbols,
+                lookback_years: 3.0,
+            };
+            if (storePath) {
+                fetchPayload.store_path = storePath;
+            }
+            const response = await fetch("/api/universe/import/fetch", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(fetchPayload),
+            });
+            if (!response.ok) {
+                const detail = await readErrorMessage(response);
+                throw new Error(detail || `Request failed with status ${response.status}`);
+            }
+            const payload = await response.json();
+            const fetched = Array.isArray(payload?.fetched) ? payload.fetched : [];
+            const missing = Array.isArray(payload?.missing) ? payload.missing : [];
+            const warnings = Array.isArray(payload?.warnings) ? payload.warnings : [];
+            const summaryParts = [
+                `Imported ${symbols.length} symbol${symbols.length === 1 ? "" : "s"} from ${file.name}.`,
+            ];
+            if (fetched.length) {
+                summaryParts.push(
+                    `Fetched ${fetched.length} symbol${fetched.length === 1 ? "" : "s"} from Polygon to fill missing history.`,
+                );
+            } else {
+                summaryParts.push("All symbols already had cached history.");
+            }
+            if (missing.length) {
+                summaryParts.push(
+                    `${missing.length} symbol${missing.length === 1 ? "" : "s"} still lack historical bars. They will be fetched automatically when tests run.`,
+                );
+            }
+            warnings.forEach((warning) => {
+                if (typeof warning === "string" && warning.trim()) {
+                    summaryParts.push(warning.trim());
+                }
+            });
+            const level = missing.length || warnings.length ? "warning" : "success";
+            setUniverseMessage(summaryParts.join(" "), level);
+        } catch (fetchError) {
+            console.error("Failed to backfill universe data", fetchError);
+            setUniverseMessage(
+                fetchError?.message || "Imported symbols but failed to ensure historical coverage.",
+                "error",
+            );
+        }
+    } catch (error) {
+        console.error("Failed to import universe CSV", error);
+        setUniverseMessage(error?.message || "Unable to import symbols from CSV.", "error");
+    } finally {
+        input.value = "";
+    }
+}
+
+function parseUniverseCsv(csvText) {
+    if (typeof csvText !== "string" || !csvText.trim()) {
+        return [];
+    }
+    const lines = csvText.split(/\r?\n/);
+    const symbols = [];
+    lines.forEach((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+            return;
+        }
+        const columns = splitCsvLine(trimmed);
+        if (!columns.length) {
+            return;
+        }
+        let candidate = columns[0];
+        if (columns[0].toUpperCase() === "SYM" && columns.length > 1) {
+            candidate = columns[1];
+        } else if (columns[0].toUpperCase() === "SYMBOL" && columns.length > 1) {
+            candidate = columns[1];
+        }
+        if (typeof candidate !== "string") {
+            return;
+        }
+        let token = candidate.split("·")[0];
+        token = token.split(" ")[0];
+        token = token.replace(/[^A-Za-z0-9._-]/g, "");
+        token = token.trim().toUpperCase();
+        if (token && token !== "SYM" && token !== "SYMBOL" && token !== "TYPE") {
+            symbols.push(token);
+        }
+    });
+    return Array.from(new Set(symbols));
+}
+
+function splitCsvLine(line) {
+    const result = [];
+    let current = "";
+    let insideQuotes = false;
+
+    for (let i = 0; i < line.length; i += 1) {
+        const char = line[i];
+        if (char === '"') {
+            if (insideQuotes && line[i + 1] === '"') {
+                current += '"';
+                i += 1;
+            } else {
+                insideQuotes = !insideQuotes;
+            }
+            continue;
+        }
+        if (char === "," && !insideQuotes) {
+            result.push(current.trim());
+            current = "";
+        } else {
+            current += char;
+        }
+    }
+    result.push(current.trim());
+    return result;
+}
+
 async function loadAvailableSymbols() {
     if (!elements.availableSymbolsSelect) {
         return;
     }
-    elements.availableSymbolsSelect.innerHTML = "";
-    let symbols = DEFAULT_SYMBOLS;
+    setUniverseMessage("Loading cached symbols…", "info");
+    let symbols = [...DEFAULT_SYMBOLS];
+    let messageLevel = "info";
+    let messageText = "";
     try {
         const response = await fetch("/api/symbols");
         if (response.ok) {
@@ -1591,17 +2810,15 @@ async function loadAvailableSymbols() {
         }
     } catch (error) {
         console.warn("Failed to load cached symbols", error);
+        messageLevel = "warning";
+        messageText = "Unable to load cached symbols; using defaults.";
     }
 
-    symbols.forEach((symbol) => {
-        const option = document.createElement("option");
-        option.value = symbol;
-        option.textContent = symbol;
-        if (DEFAULT_SYMBOLS.includes(symbol)) {
-            option.selected = true;
-        }
-        elements.availableSymbolsSelect.append(option);
-    });
+    applyUniverseSymbols(symbols, { source: "cache" });
+    if (!messageText && symbols.length) {
+        messageText = `Loaded ${symbols.length} cached symbol${symbols.length === 1 ? "" : "s"}.`;
+    }
+    setUniverseMessage(messageText, messageLevel);
 }
 
 function gatherSymbols(formData) {
@@ -1615,6 +2832,21 @@ function gatherSymbols(formData) {
     const combined = [...selected, ...manual];
     const unique = Array.from(new Set(combined));
     return unique.length ? unique : DEFAULT_SYMBOLS;
+}
+
+function gatherExplicitSymbols(formData) {
+    const selected = elements.availableSymbolsSelect
+        ? Array.from(elements.availableSymbolsSelect.selectedOptions).map((option) => option.value.toUpperCase()).filter(Boolean)
+        : [];
+    const manualRaw = (formData.get("extra_symbols") || "").toString();
+    const manual = manualRaw
+        .split(",")
+        .map((value) => value.trim().toUpperCase())
+        .filter(Boolean);
+    const combined = [...selected, ...manual];
+    const unique = Array.from(new Set(combined));
+    const explicit = selected.length > 0 || manualRaw.trim().length > 0;
+    return { symbols: unique, explicit };
 }
 
 function parseIntOr(value, fallback) {

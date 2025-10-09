@@ -1,7 +1,335 @@
-{% extends "base.html" %} {% block title %}Momentum Dashboard (Coming Soon){% endblock %} {% block page_id %}momentum{% endblock %} {% block content %}
-<section class="coming-soon">
-  <h1>Momentum Trade Playbook</h1>
-  <p>A full optimization workspace for momentum rotation strategies is on the roadmap. Stay tuned for position sizing controls, performance analytics, and live charting.</p>
-  <a class="button" href="/">Return to Home</a>
+{% extends "base.html" %} {% block title %}Momentum Dashboard{% endblock %} {% block page_id %}momentum{% endblock %} {% block head_scripts %}
+<script src="https://cdn.plot.ly/plotly-2.30.0.min.js" defer></script>
+{% endblock %} {% block footer_scripts %}
+<script src="/static/app.js" type="module" defer></script>
+{% endblock %} {% block content %}
+<section class="layout momentum-layout">
+  <aside class="control-panel">
+    <form id="momentum-form" class="control-form">
+      <div class="form-section">
+        <h2 class="form-section-title">Universe</h2>
+        <label>
+          Cached symbols
+          <select id="available-symbols" multiple size="8"></select>
+        </label>
+        <label>
+          Extra symbols
+          <input id="extra-symbols" name="extra_symbols" type="text" placeholder="e.g. NVDA, META" />
+        </label>
+        <div class="universe-actions">
+          <button type="button" class="button-secondary" id="use-nasdaq-universe">Use NASDAQ Universe</button>
+          <button type="button" class="button-secondary" id="use-snp100-universe">Use S&amp;P 100 Universe</button>
+          <label class="file-input">
+            <span>Import watchlist (CSV)</span>
+            <input id="universe-import" type="file" accept=".csv,text/csv" />
+          </label>
+        </div>
+        <p class="form-help" id="universe-message">Select cached symbols or import a list to define your universe.</p>
+      </div>
+
+      <div class="form-section">
+        <h2 class="form-section-title">Mode</h2>
+        <label class="form-radio">
+          <input type="radio" name="momentum_mode" value="backtest" checked />
+          <span>Backtest specific parameter sets</span>
+        </label>
+        <label class="form-radio">
+          <input type="radio" name="momentum_mode" value="optimize" />
+          <span>Optimize S&amp;P 100 parameters</span>
+        </label>
+        <p class="form-help" id="momentum-mode-message">Define one or more parameter sets to backtest directly against your selected universe.</p>
+      </div>
+
+      <div class="form-section">
+        <h2 class="form-section-title">Experiment Settings</h2>
+        <div class="form-grid">
+          <label>
+            Initial cash ($)
+            <input name="initial_cash" type="number" min="1000" step="1000" value="100000" />
+          </label>
+          <label>
+            Training start
+            <input id="training-start" name="training_start" type="date" required />
+          </label>
+          <label>
+            Training end
+            <input id="training-end" name="training_end" type="date" required />
+          </label>
+          <label>
+            Paper start
+            <input id="paper-start" name="paper_start" type="date" required />
+          </label>
+          <label>
+            Paper end
+            <input id="paper-end" name="paper_end" type="date" required />
+          </label>
+        </div>
+        <label class="form-checkbox">
+          <input id="auto-fetch" name="auto_fetch" type="checkbox" />
+          <span>Download missing Polygon data automatically</span>
+        </label>
+        <label>
+          Store path
+          <input id="store-path" name="store_path" type="text" placeholder="Optional override of default store" />
+        </label>
+      </div>
+
+      <div class="form-section" id="momentum-optimize-section" hidden>
+        <h2 class="form-section-title">Optimization Ranges</h2>
+        <p class="form-help">Adjust the search ranges used when optimizing. Cash reserve and momentum thresholds are expressed as decimal fractions (0.05 = 5%).</p>
+        <div class="form-grid parameter-grid">
+          <label>
+            Lookback min
+            <input name="opt_lookback_min" type="number" min="1" step="1" value="84" />
+          </label>
+          <label>
+            Lookback max
+            <input name="opt_lookback_max" type="number" min="1" step="1" value="189" />
+          </label>
+          <label>
+            Lookback step
+            <input name="opt_lookback_step" type="number" min="1" step="1" value="21" />
+          </label>
+          <label>
+            Skip min
+            <input name="opt_skip_min" type="number" min="0" step="1" value="5" />
+          </label>
+          <label>
+            Skip max
+            <input name="opt_skip_max" type="number" min="0" step="1" value="21" />
+          </label>
+          <label>
+            Skip step
+            <input name="opt_skip_step" type="number" min="1" step="1" value="8" />
+          </label>
+          <label>
+            Rebalance min
+            <input name="opt_rebalance_min" type="number" min="1" step="1" value="10" />
+          </label>
+          <label>
+            Rebalance max
+            <input name="opt_rebalance_max" type="number" min="1" step="1" value="30" />
+          </label>
+          <label>
+            Rebalance step
+            <input name="opt_rebalance_step" type="number" min="1" step="1" value="10" />
+          </label>
+          <label>
+            Max positions min
+            <input name="opt_positions_min" type="number" min="1" step="1" value="4" />
+          </label>
+          <label>
+            Max positions max
+            <input name="opt_positions_max" type="number" min="1" step="1" value="10" />
+          </label>
+          <label>
+            Max positions step
+            <input name="opt_positions_step" type="number" min="1" step="1" value="2" />
+          </label>
+          <label>
+            Lot size min
+            <input name="opt_lot_min" type="number" min="1" step="1" value="1" />
+          </label>
+          <label>
+            Lot size max
+            <input name="opt_lot_max" type="number" min="1" step="1" value="1" />
+          </label>
+          <label>
+            Lot size step
+            <input name="opt_lot_step" type="number" min="1" step="1" value="1" />
+          </label>
+        </div>
+        <div class="form-grid parameter-grid">
+          <label>
+            Cash reserve min
+            <input name="opt_cash_min" type="number" min="0" max="0.95" step="0.01" value="0.05" />
+          </label>
+          <label>
+            Cash reserve max
+            <input name="opt_cash_max" type="number" min="0" max="0.95" step="0.01" value="0.15" />
+          </label>
+          <label>
+            Cash reserve step
+            <input name="opt_cash_step" type="number" min="0" max="0.95" step="0.001" value="0.05" />
+          </label>
+          <label>
+            Min momentum min
+            <input name="opt_min_momentum_min" type="number" step="0.01" value="0" />
+          </label>
+          <label>
+            Min momentum max
+            <input name="opt_min_momentum_max" type="number" step="0.01" value="0.15" />
+          </label>
+          <label>
+            Min momentum step
+            <input name="opt_min_momentum_step" type="number" min="0" step="0.001" value="0.05" />
+          </label>
+          <label>
+            Volatility window min
+            <input name="opt_vol_window_min" type="number" min="1" step="1" value="15" />
+          </label>
+          <label>
+            Volatility window max
+            <input name="opt_vol_window_max" type="number" min="1" step="1" value="35" />
+          </label>
+          <label>
+            Volatility window step
+            <input name="opt_vol_window_step" type="number" min="1" step="1" value="5" />
+          </label>
+          <label>
+            Volatility exponent min
+            <input name="opt_vol_exp_min" type="number" min="0" step="0.01" value="0.8" />
+          </label>
+          <label>
+            Volatility exponent max
+            <input name="opt_vol_exp_max" type="number" min="0" step="0.01" value="1.2" />
+          </label>
+          <label>
+            Volatility exponent step
+            <input name="opt_vol_exp_step" type="number" min="0" step="0.01" value="0.2" />
+          </label>
+          <label>
+            Max combinations
+            <input name="opt_max_combinations" type="number" min="1" max="600" step="1" value="60" />
+          </label>
+          <label>
+            Lookback years
+            <input name="opt_lookback_years" type="number" min="0.25" max="10" step="0.25" value="3" />
+          </label>
+        </div>
+      </div>
+
+      <div id="momentum-parameter-section" class="form-section form-section--params">
+        <div class="form-section-header">
+          <h2 class="form-section-title">Momentum Parameter Sets</h2>
+          <button type="button" class="button-secondary" id="add-parameter-set">Add Parameter Set</button>
+        </div>
+        <div id="momentum-parameter-list" class="parameter-list"></div>
+        <template id="momentum-parameter-template">
+          <article class="parameter-card" data-parameter-card>
+            <header class="parameter-card__header">
+              <h3>Set <span data-parameter-index></span></h3>
+              <button type="button" class="button-link" data-remove-parameter hidden>Remove</button>
+            </header>
+            <div class="form-grid parameter-grid">
+              <label>
+                Lookback days
+                <input type="number" data-field="lookback_days" min="1" step="1" value="126" />
+              </label>
+              <label>
+                Skip days
+                <input type="number" data-field="skip_days" min="0" step="1" value="21" />
+              </label>
+              <label>
+                Rebalance every (days)
+                <input type="number" data-field="rebalance_days" min="1" step="1" value="21" />
+              </label>
+              <label>
+                Max positions
+                <input type="number" data-field="max_positions" min="1" step="1" value="5" />
+              </label>
+              <label>
+                Lot size
+                <input type="number" data-field="lot_size" min="1" step="1" value="1" />
+              </label>
+              <label>
+                Cash reserve (%)
+                <input type="number" data-field="cash_reserve_pct" min="0" max="95" step="1" value="5" />
+              </label>
+              <label>
+                Minimum momentum (z-score)
+                <input type="number" data-field="min_momentum" step="0.1" value="0" />
+              </label>
+              <label>
+                Volatility window (days)
+                <input type="number" data-field="volatility_window" min="1" step="1" value="20" />
+              </label>
+              <label>
+                Volatility exponent
+                <input type="number" data-field="volatility_exponent" min="0" step="0.1" value="1.0" />
+              </label>
+            </div>
+          </article>
+        </template>
+      </div>
+
+      <button id="momentum-run" type="submit" class="button">Run Momentum Backtest</button>
+    </form>
+    <div class="status" id="momentum-status"></div>
+  </aside>
+
+  <section class="metrics" id="momentum-metrics">
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Paper Trading Metrics</h3>
+        <span id="momentum-paper-window" class="metric-window"></span>
+      </div>
+      <div class="metric-grid" id="momentum-paper-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Training Metrics</h3>
+        <span id="momentum-training-window" class="metric-window"></span>
+      </div>
+      <div class="metric-grid" id="momentum-training-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Parameter Leaderboard</h3>
+      </div>
+      <div class="table-scroll">
+        <table id="momentum-ranking-table">
+          <thead>
+            <tr>
+              <th>Set Label</th>
+              <th>Sharpe</th>
+              <th>Total Return</th>
+              <th>CAGR</th>
+              <th>Max Drawdown</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="metric-group" id="momentum-warnings" hidden>
+      <div class="metric-group-header">
+        <h3>Warnings</h3>
+      </div>
+      <ul class="metric-list" id="momentum-warning-list"></ul>
+    </div>
+  </section>
+
+  <section class="chart-container">
+    <div class="chart-header">
+      <h2>Momentum Equity Curves</h2>
+      <label class="chart-selector">
+        Parameter set
+        <select id="momentum-result-select"></select>
+      </label>
+    </div>
+    <div id="momentum-training-chart" class="chart"></div>
+    <div id="momentum-paper-chart" class="chart"></div>
+  </section>
+
+  <section class="chart-container" id="momentum-trades-section">
+    <div class="chart-header">
+      <h2>Trade Blotter</h2>
+    </div>
+    <div class="table-scroll">
+      <table id="momentum-trade-table">
+        <thead>
+          <tr>
+            <th>Timestamp</th>
+            <th>Symbol</th>
+            <th>Quantity</th>
+            <th>Price</th>
+            <th>Cash After</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
 </section>
 {% endblock %}

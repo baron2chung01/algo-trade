@@ -1,0 +1,5 @@
+universe_name,description,symbols
+mega_cap_quality,"Mega-cap tech and financial leaders","AAPL,MSFT,GOOGL,NVDA,META,AVGO,COST,LIN,MS,V"
+growth_defensive_blend,"Growth tech with defensive balance","ASML,ADBE,CRM,PANW,NOW,LULU,CMG,ELV,LMT,NKE"
+factor_diversified_core,"Sector-balanced large-cap mix","AAPL,MSFT,NVDA,V,MA,UNH,ELV,LIN,HD,COP,CVX,PGR,LLY,MRK,LMT"
+high_beta_tilt,"Higher-volatility momentum names","AMD,TSLA,NFLX,TTD,SNPS,ON,CRWD,MELI,DDOG,ZS"

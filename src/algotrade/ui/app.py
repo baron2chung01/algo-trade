@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+import json
 import os
 import re
 from dataclasses import asdict, fields, is_dataclass
@@ -9,9 +11,10 @@ from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from math import ceil
 from pathlib import Path
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import pandas as pd
+import requests
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -21,9 +24,19 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ..config import AppSettings
 from ..data.stores.local import ParquetBarStore
 from ..data.ingest import ingest_polygon_daily, update_polygon_daily_incremental
+from ..data.universe import (
+    fetch_snp100_members,
+    ingest_universe_frame,
+    latest_symbols,
+    load_universe,
+)
 from ..experiments import (
     BreakoutParameterSpec,
     FloatRange,
+    MomentumExperimentConfig,
+    MomentumParameters,
+    MomentumOptimizationSpec,
+    MomentumOptimizationSummary,
     VCPParameterSpec,
     VCPParameters,
     VCPPatternDetection,
@@ -34,7 +47,10 @@ from ..experiments import (
     default_vcp_scan_universe,
     optimize_breakout_parameters,
     optimize_mean_reversion_parameters,
+    optimize_momentum_parameters,
     optimize_vcp_parameters,
+    generate_momentum_parameter_grid,
+    run_momentum_experiment,
     VCPScanCandidate,
     scan_vcp_candidates,
     scan_vcp_history,
@@ -48,6 +64,9 @@ DEFAULT_STORE_PATH = Path(
 DEFAULT_BAR_SIZE = "1d"
 DEFAULT_SYMBOLS = ("AAPL", "MSFT")
 
+NASDAQ_TRADER_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt"
+NASDAQ_TRADER_CACHE_TTL = timedelta(hours=12)
+
 _VCP_PARAMETER_FIELDS = {field.name for field in fields(VCPParameters)}
 
 
@@ -55,6 +74,7 @@ class StrategyName(str, Enum):
     MEAN_REVERSION = "mean_reversion"
     BREAKOUT = "breakout"
     VCP = "vcp"
+    MOMENTUM = "momentum"
 
 
 class VCPScanTimeframe(str, Enum):
@@ -536,6 +556,230 @@ class VCPPatternRequest(BaseModel):
         return self
 
 
+class MomentumParameterRequest(BaseModel):
+    lookback_days: int = Field(126, gt=0)
+    skip_days: int = Field(21, ge=0)
+    rebalance_days: int = Field(21, gt=0)
+    max_positions: int = Field(5, gt=0)
+    lot_size: int = Field(1, gt=0)
+    cash_reserve_pct: float = Field(0.05, ge=0.0, lt=1.0)
+    min_momentum: float = Field(0.0)
+    volatility_window: int = Field(20, ge=0)
+    volatility_exponent: float = Field(1.0, ge=0.0)
+
+    model_config = ConfigDict(extra="forbid")
+
+    def to_parameters(self) -> MomentumParameters:
+        return MomentumParameters(
+            lookback_days=int(self.lookback_days),
+            skip_days=int(self.skip_days),
+            rebalance_days=int(self.rebalance_days),
+            max_positions=int(self.max_positions),
+            lot_size=int(self.lot_size),
+            cash_reserve_pct=float(self.cash_reserve_pct),
+            min_momentum=float(self.min_momentum),
+            volatility_window=int(self.volatility_window),
+            volatility_exponent=float(self.volatility_exponent),
+        )
+
+
+class MomentumRunRequest(BaseModel):
+    symbols: List[str] = Field(default_factory=list)
+    initial_cash: float = Field(100_000.0, gt=0)
+    training_window: Tuple[date, date]
+    paper_window: Tuple[date, date]
+    parameters: List[MomentumParameterRequest] = Field(default_factory=list)
+    store_path: str | None = None
+    bar_size: str = Field(DEFAULT_BAR_SIZE)
+    auto_fetch: bool = False
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "MomentumRunRequest":
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for symbol in self.symbols:
+            candidate = symbol.strip().upper()
+            if not candidate or candidate in seen:
+                continue
+            cleaned.append(candidate)
+            seen.add(candidate)
+        if not cleaned:
+            raise ValueError("At least one symbol must be provided.")
+        self.symbols = cleaned
+
+        normalized_bar_size = self.bar_size.strip().lower()
+        if normalized_bar_size != DEFAULT_BAR_SIZE:
+            raise ValueError("Only 1d bar size is currently supported.")
+        self.bar_size = normalized_bar_size
+
+        if self.training_window[0] >= self.training_window[1]:
+            raise ValueError("training_window start must be before end")
+        if self.paper_window[0] >= self.paper_window[1]:
+            raise ValueError("paper_window start must be before end")
+
+        if not self.parameters:
+            self.parameters = [MomentumParameterRequest()]
+
+        return self
+
+    def training_period(self) -> Tuple[date, date]:
+        return self.training_window
+
+    def paper_period(self) -> Tuple[date, date]:
+        return self.paper_window
+
+    def to_config(self, store_path: Path) -> MomentumExperimentConfig:
+        return MomentumExperimentConfig(
+            store_path=store_path,
+            universe=self.symbols,
+            initial_cash=float(self.initial_cash),
+            training_window=self.training_window,
+            paper_window=self.paper_window,
+            bar_size=self.bar_size,
+        )
+
+    def to_parameters(self) -> List[MomentumParameters]:
+        return [item.to_parameters() for item in self.parameters]
+
+
+class MomentumOptimizationParameterSpecRequest(BaseModel):
+    lookback_days: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=84, maximum=189, step=21)
+    )
+    skip_days: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=5, maximum=21, step=8)
+    )
+    rebalance_days: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=10, maximum=30, step=10)
+    )
+    max_positions: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=4, maximum=10, step=2)
+    )
+    lot_size: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=1, maximum=1, step=1)
+    )
+    cash_reserve_pct: FloatRangeRequest = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=0.05, maximum=0.15, step=0.05)
+    )
+    min_momentum: FloatRangeRequest = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=0.0, maximum=0.15, step=0.05)
+    )
+    volatility_window: RangeRequest = Field(
+        default_factory=lambda: RangeRequest(minimum=15, maximum=35, step=5)
+    )
+    volatility_exponent: FloatRangeRequest = Field(
+        default_factory=lambda: FloatRangeRequest(
+            minimum=0.8, maximum=1.2, step=0.2)
+    )
+    max_combinations: int = Field(60, ge=1, le=600)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @staticmethod
+    def _range_values(range_request: RangeRequest) -> List[int]:
+        values: List[int] = []
+        current = int(range_request.minimum)
+        while current <= range_request.maximum:
+            values.append(current)
+            current += range_request.step
+        return values
+
+    @staticmethod
+    def _float_values(range_request: FloatRangeRequest) -> List[float]:
+        values: List[float] = []
+        current = float(range_request.minimum)
+        step = float(range_request.step)
+        epsilon = step / 10 if step else 1e-6
+        while current <= range_request.maximum + epsilon:
+            values.append(round(current, 6))
+            current += step
+        return values
+
+    def to_spec(self) -> tuple[MomentumOptimizationSpec, int]:
+        spec = MomentumOptimizationSpec(
+            lookback_days=self._range_values(self.lookback_days),
+            skip_days=self._range_values(self.skip_days),
+            rebalance_days=self._range_values(self.rebalance_days),
+            max_positions=self._range_values(self.max_positions),
+            lot_size=self._range_values(self.lot_size),
+            cash_reserve_pct=self._float_values(self.cash_reserve_pct),
+            min_momentum=self._float_values(self.min_momentum),
+            volatility_window=self._range_values(self.volatility_window),
+            volatility_exponent=self._float_values(self.volatility_exponent),
+        )
+        return spec, int(self.max_combinations)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "lookback_days": self._range_values(self.lookback_days),
+            "skip_days": self._range_values(self.skip_days),
+            "rebalance_days": self._range_values(self.rebalance_days),
+            "max_positions": self._range_values(self.max_positions),
+            "lot_size": self._range_values(self.lot_size),
+            "cash_reserve_pct": self._float_values(self.cash_reserve_pct),
+            "min_momentum": self._float_values(self.min_momentum),
+            "volatility_window": self._range_values(self.volatility_window),
+            "volatility_exponent": self._float_values(self.volatility_exponent),
+            "max_combinations": int(self.max_combinations),
+        }
+
+
+class MomentumOptimizeRequest(BaseModel):
+    initial_cash: float = Field(100_000.0, gt=0)
+    training_window: Tuple[date, date]
+    paper_window: Tuple[date, date]
+    parameter_spec: MomentumOptimizationParameterSpecRequest = Field(
+        default_factory=MomentumOptimizationParameterSpecRequest
+    )
+    store_path: str | None = None
+    bar_size: str = Field(DEFAULT_BAR_SIZE)
+    symbols: List[str] | None = None
+    use_snp100: bool = True
+    auto_fetch: bool = True
+    lookback_years: float = Field(3.0, gt=0.0, le=10.0)
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "MomentumOptimizeRequest":
+        normalized_symbols: list[str] = []
+        seen: set[str] = set()
+        for symbol in self.symbols or []:
+            candidate = str(symbol).strip().upper()
+            if candidate and candidate not in seen:
+                normalized_symbols.append(candidate)
+                seen.add(candidate)
+        self.symbols = normalized_symbols or None
+
+        normalized_bar_size = self.bar_size.strip().lower()
+        if normalized_bar_size != DEFAULT_BAR_SIZE:
+            raise ValueError("Only 1d bar size is currently supported.")
+        self.bar_size = normalized_bar_size
+
+        train_start, train_end = self.training_window
+        paper_start, paper_end = self.paper_window
+
+        if train_start >= train_end:
+            raise ValueError("training_window start must be before end")
+        if paper_start >= paper_end:
+            raise ValueError("paper_window start must be before end")
+        if train_end >= paper_start:
+            raise ValueError(
+                "training_window must end before the paper_window starts")
+
+        if self.lookback_years <= 0:
+            raise ValueError("lookback_years must be positive")
+
+        return self
+
+    def resolved_symbols(self) -> List[str] | None:
+        return self.symbols
+
+
 class VCPScanExportRequest(BaseModel):
     symbols: List[str] = Field(
         default_factory=list,
@@ -584,6 +828,50 @@ class VCPScanExportRequest(BaseModel):
         route_value = re.sub(r"\s+", "", route_value)
         self.route = route_value or "SMART/AMEX"
 
+        return self
+
+
+class UniverseFetchRequest(BaseModel):
+    symbols: List[str] = Field(
+        default_factory=list,
+        description="Universe symbols to ensure are cached in Polygon history",
+    )
+    store_path: str | None = Field(
+        default=None,
+        description="Parquet store path used to verify cached bars.",
+    )
+    bar_size: str = Field(
+        default=DEFAULT_BAR_SIZE,
+        description="Historical bar size to fetch and validate.",
+    )
+    lookback_years: float = Field(
+        default=3.0,
+        gt=0.0,
+        le=10.0,
+        description="Years of history to backfill when downloading from Polygon.",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "UniverseFetchRequest":
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for symbol in self.symbols:
+            candidate = str(symbol).strip().upper()
+            if candidate and candidate not in seen:
+                cleaned.append(candidate)
+                seen.add(candidate)
+        if not cleaned:
+            raise ValueError("At least one symbol must be provided.")
+        self.symbols = cleaned
+
+        normalized_bar_size = self.bar_size.strip().lower()
+        if normalized_bar_size != DEFAULT_BAR_SIZE:
+            raise ValueError("Only 1d bar size is currently supported.")
+        self.bar_size = normalized_bar_size
+
+        self.lookback_years = float(self.lookback_years)
         return self
 
 
@@ -672,6 +960,163 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
         payload: Dict[str, object] = {"symbols": symbols}
         if missing:
             payload["missing"] = missing
+        if warnings:
+            payload["warnings"] = warnings
+        return JSONResponse(payload)
+
+    @app.get("/api/universe/nasdaq", response_class=JSONResponse)
+    async def list_nasdaq_universe(
+        store_path: str = Query(
+            default=str(DEFAULT_STORE_PATH),
+            description="Path to the Parquet bar store used to check cached symbols.",
+        ),
+        bar_size: str = Query(
+            default=DEFAULT_BAR_SIZE,
+            description="Historical bar size to match when checking cache availability.",
+        ),
+    ) -> JSONResponse:
+        normalized_bar_size = bar_size.strip().lower()
+        if normalized_bar_size != DEFAULT_BAR_SIZE:
+            raise HTTPException(
+                status_code=400, detail="Only 1d bar size is supported.")
+
+        settings = AppSettings()
+        nasdaq_symbols, warnings = _load_latest_nasdaq_symbols(settings)
+        if not nasdaq_symbols:
+            detail: Dict[str, object] = {
+                "message": "NASDAQ universe membership not available.",
+            }
+            if warnings:
+                detail["warnings"] = warnings
+            raise HTTPException(status_code=404, detail=detail)
+
+        store_root = Path(store_path).expanduser().resolve()
+        store = ParquetBarStore(store_root)
+        missing = [
+            symbol for symbol in nasdaq_symbols if not store.path_for(symbol, normalized_bar_size).exists()
+        ]
+
+        payload: Dict[str, object] = {"symbols": nasdaq_symbols}
+        if missing:
+            payload["missing"] = missing
+        if warnings:
+            payload["warnings"] = warnings
+        return JSONResponse(payload)
+
+    @app.get("/api/universe/snp100", response_class=JSONResponse)
+    async def list_snp100_universe(
+        store_path: str = Query(
+            default=str(DEFAULT_STORE_PATH),
+            description="Path to the Parquet bar store used to check cached symbols.",
+        ),
+        bar_size: str = Query(
+            default=DEFAULT_BAR_SIZE,
+            description="Historical bar size to match when checking cache availability.",
+        ),
+    ) -> JSONResponse:
+        normalized_bar_size = bar_size.strip().lower()
+        if normalized_bar_size != DEFAULT_BAR_SIZE:
+            raise HTTPException(
+                status_code=400, detail="Only 1d bar size is supported."
+            )
+
+        settings = AppSettings()
+        snp_symbols, warnings = _load_latest_snp100_symbols(settings)
+        if not snp_symbols:
+            detail: Dict[str, object] = {
+                "message": "S&P 100 universe membership not available.",
+            }
+            if warnings:
+                detail["warnings"] = warnings
+            raise HTTPException(status_code=404, detail=detail)
+
+        store_root = Path(store_path).expanduser().resolve()
+        store = ParquetBarStore(store_root)
+        missing = [
+            symbol
+            for symbol in snp_symbols
+            if not store.path_for(symbol, normalized_bar_size).exists()
+        ]
+
+        fetched_symbols: List[str] = []
+        fetch_warnings: List[str] = []
+
+        if missing:
+            try:
+                fetched_symbols, fetch_warnings = _fetch_polygon_history_for_symbols(
+                    store,
+                    missing,
+                    lookback_years=3.0,
+                )
+            except Exception as exc:  # pragma: no cover - defensive fetch failure
+                warnings.append(
+                    f"Failed to download missing S&P 100 history from Polygon: {exc}"
+                )
+            else:
+                if fetch_warnings:
+                    warnings.extend(fetch_warnings)
+                if fetched_symbols:
+                    missing = [
+                        symbol
+                        for symbol in snp_symbols
+                        if not store.path_for(symbol, normalized_bar_size).exists()
+                    ]
+
+        payload: Dict[str, object] = {"symbols": snp_symbols}
+        if fetched_symbols:
+            payload["fetched"] = fetched_symbols
+        if missing:
+            payload["missing"] = missing
+        if warnings:
+            payload["warnings"] = warnings
+        return JSONResponse(payload)
+
+    @app.post("/api/universe/import/fetch", response_class=JSONResponse)
+    async def fetch_import_universe(request_body: UniverseFetchRequest) -> JSONResponse:
+        store_root = Path(
+            request_body.store_path or DEFAULT_STORE_PATH
+        ).expanduser().resolve()
+        store = ParquetBarStore(store_root)
+
+        def _missing_symbols(symbols: Iterable[str]) -> list[str]:
+            return [
+                symbol
+                for symbol in symbols
+                if not store.path_for(symbol, request_body.bar_size).exists()
+            ]
+
+        missing_before = _missing_symbols(request_body.symbols)
+        fetched: list[str] = []
+        warnings: list[str] = []
+
+        if missing_before:
+            try:
+                fetched, fetch_warnings = _fetch_polygon_history_for_symbols(
+                    store,
+                    missing_before,
+                    lookback_years=request_body.lookback_years,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:  # pragma: no cover - defensive fetch guard
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to download data from Polygon: {exc}",
+                ) from exc
+            if fetch_warnings:
+                warnings.extend(fetch_warnings)
+
+        missing_after = _missing_symbols(request_body.symbols)
+
+        payload: Dict[str, Any] = {
+            "requested": request_body.symbols,
+            "bar_size": request_body.bar_size,
+            "store_path": str(store_root),
+            "fetched": fetched,
+            "missing": missing_after,
+        }
+        if missing_before:
+            payload["initial_missing"] = missing_before
         if warnings:
             payload["warnings"] = warnings
         return JSONResponse(payload)
@@ -867,6 +1312,303 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
 
         return JSONResponse(payload)
 
+    @app.post("/api/momentum/run", response_class=JSONResponse)
+    async def run_momentum(request_body: MomentumRunRequest) -> JSONResponse:
+        store_root = Path(
+            request_body.store_path or DEFAULT_STORE_PATH
+        ).expanduser().resolve()
+        config = request_body.to_config(store_root)
+        try:
+            config.validate()
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        store = ParquetBarStore(store_root)
+
+        fetched_symbols: List[str] = []
+        if request_body.auto_fetch:
+            training_start, training_end = request_body.training_period()
+            paper_start, paper_end = request_body.paper_period()
+            paper_days = (paper_end - paper_start).days
+            training_days = (training_end - training_start).days
+            if paper_days <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="paper_window must span at least one day.",
+                )
+            if training_days <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="training_window must span at least one day.",
+                )
+            try:
+                fetched_symbols = _maybe_fetch_polygon_data(
+                    store,
+                    request_body.symbols,
+                    bar_size=config.bar_size,
+                    paper_days=paper_days,
+                    training_years=max(training_days / 365.25, 1 / 365.25),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:  # pragma: no cover - defensive fetch guard
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to download data from Polygon: {exc}",
+                ) from exc
+
+        missing_files = [
+            {
+                "symbol": symbol,
+                "path": str(store.path_for(symbol, config.bar_size)),
+            }
+            for symbol in config.universe
+            if not store.path_for(symbol, config.bar_size).exists()
+        ]
+        if missing_files:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "message": "Missing historical bars for the requested symbols.",
+                    "missing": missing_files,
+                },
+            )
+
+        results: List[Dict[str, Any]] = []
+        warnings: List[Dict[str, Any]] = []
+
+        for parameter in request_body.to_parameters():
+            try:
+                outcome = run_momentum_experiment(config, parameter)
+            except ValueError as exc:
+                warnings.append({
+                    "label": parameter.label(),
+                    "reason": str(exc),
+                })
+                continue
+            except Exception as exc:  # pragma: no cover - unexpected failure
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+            results.append(_serialize_momentum_result(parameter, outcome))
+
+        if not results:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "No momentum results were produced for the provided parameters.",
+                    "warnings": warnings,
+                },
+            )
+
+        rankings = sorted(
+            [
+                {
+                    "label": item["label"],
+                    "paper_sharpe": item["paper_metrics"].get("sharpe_ratio", 0.0),
+                    "paper_total_return": item["paper_metrics"].get("total_return", 0.0),
+                    "paper_cagr": item["paper_metrics"].get("cagr", 0.0),
+                    "paper_max_drawdown": item["paper_metrics"].get("max_drawdown", 0.0),
+                }
+                for item in results
+            ],
+            key=lambda entry: entry["paper_sharpe"],
+            reverse=True,
+        )
+
+        payload: Dict[str, Any] = {
+            "symbols": list(config.universe),
+            "store_path": str(store_root),
+            "initial_cash": float(config.initial_cash),
+            "training_window": {
+                "start": config.training_window[0].isoformat(),
+                "end": config.training_window[1].isoformat(),
+            },
+            "paper_window": {
+                "start": config.paper_window[0].isoformat(),
+                "end": config.paper_window[1].isoformat(),
+            },
+            "bar_size": config.bar_size,
+            "results": results,
+            "rankings": rankings,
+        }
+        if fetched_symbols:
+            payload["fetched_symbols"] = fetched_symbols
+        if warnings:
+            payload["warnings"] = warnings
+
+        return JSONResponse(payload)
+
+    @app.post("/api/momentum/optimize", response_class=JSONResponse)
+    async def optimize_momentum_route(
+        request_body: MomentumOptimizeRequest,
+    ) -> JSONResponse:
+        store_root = Path(
+            request_body.store_path or DEFAULT_STORE_PATH
+        ).expanduser().resolve()
+        store = ParquetBarStore(store_root)
+
+        warnings: List[str] = []
+        fetched_symbols: List[str] = []
+
+        custom_symbols = request_body.resolved_symbols()
+        if custom_symbols:
+            universe_symbols = list(custom_symbols)
+        elif request_body.use_snp100:
+            settings = AppSettings()
+            universe_symbols, membership_warnings = _load_latest_snp100_symbols(
+                settings)
+            warnings.extend(membership_warnings)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="No symbols provided for momentum optimization.",
+            )
+
+        if not universe_symbols:
+            detail: Dict[str, object] = {
+                "message": "No symbols available for momentum optimization.",
+            }
+            if warnings:
+                detail["warnings"] = warnings
+            raise HTTPException(status_code=503, detail=detail)
+
+        universe_symbols = sorted(
+            {str(symbol).strip().upper()
+             for symbol in universe_symbols if str(symbol).strip()}
+        )
+
+        def _missing_symbols() -> List[str]:
+            return [
+                symbol
+                for symbol in universe_symbols
+                if not store.path_for(symbol, request_body.bar_size).exists()
+            ]
+
+        missing_before = _missing_symbols()
+        if request_body.auto_fetch and missing_before:
+            try:
+                fetched_symbols, fetch_warnings = _fetch_polygon_history_for_symbols(
+                    store,
+                    missing_before,
+                    lookback_years=request_body.lookback_years,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except Exception as exc:  # pragma: no cover - defensive fetch guard
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to download data from Polygon: {exc}",
+                ) from exc
+            else:
+                warnings.extend(fetch_warnings)
+
+        missing_after = _missing_symbols()
+        if missing_after:
+            detail: Dict[str, object] = {
+                "message": "Missing historical bars for the requested symbols.",
+                "missing": [
+                    {
+                        "symbol": symbol,
+                        "path": str(store.path_for(symbol, request_body.bar_size)),
+                    }
+                    for symbol in missing_after
+                ],
+            }
+            if warnings:
+                detail["warnings"] = warnings
+            if fetched_symbols:
+                detail["fetched"] = fetched_symbols
+            raise HTTPException(status_code=404, detail=detail)
+
+        try:
+            spec, max_combinations = request_body.parameter_spec.to_spec()
+            parameter_grid = generate_momentum_parameter_grid(
+                spec,
+                max_evaluations=max_combinations,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        try:
+            summary: MomentumOptimizationSummary = optimize_momentum_parameters(
+                store_root,
+                universe_symbols,
+                float(request_body.initial_cash),
+                request_body.training_window,
+                request_body.paper_window,
+                parameter_grid,
+                bar_size=request_body.bar_size,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - unexpected failure
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        evaluations = summary.evaluations
+        results_payload = [
+            _serialize_momentum_result(
+                evaluation.parameters, evaluation.outcome)
+            for evaluation in evaluations
+        ]
+
+        rankings = [
+            {
+                "label": evaluation.parameters.label(),
+                "paper_sharpe": float(evaluation.outcome.paper_metrics.sharpe_ratio),
+                "paper_total_return": float(evaluation.outcome.paper_metrics.total_return),
+                "paper_cagr": float(evaluation.outcome.paper_metrics.cagr),
+                "paper_max_drawdown": float(evaluation.outcome.paper_metrics.max_drawdown),
+            }
+            for evaluation in evaluations
+        ]
+
+        best_evaluation = summary.best()
+        best_payload = {
+            "label": best_evaluation.parameters.label(),
+            "parameters": _serialize_parameters(best_evaluation.parameters),
+            "training_metrics": _normalize_metrics(
+                asdict(best_evaluation.outcome.training_metrics)
+            ),
+            "paper_metrics": _normalize_metrics(
+                asdict(best_evaluation.outcome.paper_metrics)
+            ),
+        }
+
+        payload: Dict[str, Any] = {
+            "mode": "optimize",
+            "symbols": universe_symbols,
+            "store_path": str(store_root),
+            "initial_cash": float(request_body.initial_cash),
+            "training_window": {
+                "start": request_body.training_window[0].isoformat(),
+                "end": request_body.training_window[1].isoformat(),
+            },
+            "paper_window": {
+                "start": request_body.paper_window[0].isoformat(),
+                "end": request_body.paper_window[1].isoformat(),
+            },
+            "bar_size": request_body.bar_size,
+            "results": results_payload,
+            "rankings": rankings,
+            "evaluated_count": len(evaluations),
+            "candidate_count": len(parameter_grid),
+            "best": best_payload,
+            "parameter_spec": request_body.parameter_spec.as_dict(),
+        }
+
+        if request_body.auto_fetch:
+            payload["auto_fetch"] = True
+        if fetched_symbols:
+            payload["fetched_symbols"] = fetched_symbols
+        if warnings:
+            payload["warnings"] = warnings
+        if custom_symbols:
+            payload["universe_source"] = "custom"
+        else:
+            payload["universe_source"] = "snp100"
+
+        return JSONResponse(payload)
+
     @app.post("/api/vcp/scan", response_class=JSONResponse)
     async def scan_vcp(request_body: VCPScanRequest) -> JSONResponse:
         store_root = Path(
@@ -929,6 +1671,19 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
         store_root = Path(
             request_body.store_path or DEFAULT_STORE_PATH).expanduser().resolve()
         try:
+            fetched_symbols, fetch_warnings = _ensure_vcp_history_cache(
+                store_root,
+                request_body.symbols,
+                lookback_years=request_body.lookback_years,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:  # pragma: no cover - defensive fetch guard
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to download Polygon history: {exc}",
+            ) from exc
+        try:
             summary = scan_vcp_history(
                 store_path=store_root,
                 symbols=request_body.symbols,
@@ -956,8 +1711,18 @@ def create_app(templates_dir: Path | None = None, static_dir: Path | None = None
         if summary.missing:
             payload["missing"] = summary.missing
 
+        extra_warnings: list[str] = []
+        if fetch_warnings:
+            extra_warnings.extend(fetch_warnings)
+
         if request_body.include_warnings and summary.warnings:
-            payload["warnings"] = summary.warnings
+            extra_warnings.extend(summary.warnings)
+
+        if extra_warnings:
+            payload["warnings"] = extra_warnings
+
+        if fetched_symbols:
+            payload["fetched"] = fetched_symbols
 
         return JSONResponse(payload)
 
@@ -998,6 +1763,367 @@ def _build_watchlist_filename(name: str) -> str:
     sanitized = re.sub(r"[^A-Za-z0-9_-]+", "_", base)
     sanitized = sanitized.strip("_") or "watchlist"
     return f"{sanitized}.csv"
+
+
+def _download_nasdaq_trader_symbols(url: str = NASDAQ_TRADER_URL) -> tuple[List[str], List[str]]:
+    warnings: List[str] = []
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+    except Exception as exc:  # pragma: no cover - network failure path
+        warnings.append(f"Failed to download NASDAQ Trader universe: {exc}")
+        return [], warnings
+
+    lines = response.text.splitlines()
+    if not lines:
+        warnings.append("NASDAQ Trader feed returned an empty response.")
+        return [], warnings
+
+    header = [item.strip() for item in lines[0].split("|")]
+    columns = {name: idx for idx, name in enumerate(header)}
+
+    required_columns = [
+        "Symbol",
+        "Listing Exchange",
+        "Test Issue",
+        "NextShares",
+    ]
+    missing_columns = [
+        column for column in required_columns if column not in columns]
+    if missing_columns:
+        warnings.append(
+            "NASDAQ Trader feed missing expected columns: " +
+            ", ".join(missing_columns)
+        )
+        return [], warnings
+
+    symbol_idx = columns.get("Symbol")
+    nasdaq_symbol_idx = columns.get("NASDAQ Symbol")
+    listing_idx = columns["Listing Exchange"]
+    test_idx = columns["Test Issue"]
+    nextshares_idx = columns["NextShares"]
+    financial_idx = columns.get("Financial Status")
+
+    members: set[str] = set()
+    for raw_line in lines[1:]:
+        line = raw_line.strip()
+        if not line or line.startswith("File Creation Time"):
+            continue
+        parts = raw_line.split("|")
+        if len(parts) < len(header):
+            parts.extend([""] * (len(header) - len(parts)))
+        elif len(parts) > len(header):
+            parts = parts[:len(header)]
+
+        listing = parts[listing_idx].strip().upper()
+        if listing != "Q":
+            continue
+
+        if parts[test_idx].strip().upper() == "Y":
+            continue
+
+        if parts[nextshares_idx].strip().upper() == "Y":
+            continue
+
+        if financial_idx is not None:
+            status = parts[financial_idx].strip().upper()
+            if status in {"D", "H", "S"}:  # delinquent, trading halted, suspended
+                continue
+
+        candidate = ""
+        if nasdaq_symbol_idx is not None:
+            candidate = parts[nasdaq_symbol_idx].strip().upper()
+        if not candidate and symbol_idx is not None:
+            candidate = parts[symbol_idx].strip().upper()
+
+        if not candidate:
+            continue
+
+        members.add(candidate)
+
+    if not members:
+        warnings.append(
+            "NASDAQ Trader feed did not yield any qualifying symbols.")
+        return [], warnings
+
+    return sorted(members), warnings
+
+
+def _load_nasdaq_trader_symbols(settings: AppSettings) -> tuple[List[str], List[str]]:
+    cache_path = settings.data_paths.cache / "nasdaq_trader.json"
+    cached_symbols, cached_warnings = _load_cached_symbol_list(cache_path)
+    warnings = list(cached_warnings)
+
+    now = datetime.now(timezone.utc)
+    cache_mtime: datetime | None = None
+    try:
+        cache_mtime = datetime.fromtimestamp(
+            cache_path.stat().st_mtime, timezone.utc
+        )
+    except OSError:
+        cache_mtime = None
+
+    fetch_needed = cache_mtime is None or (
+        now - cache_mtime) > NASDAQ_TRADER_CACHE_TTL
+
+    fetched_symbols: List[str] = []
+    if fetch_needed:
+        fetched_symbols, fetch_warnings = _download_nasdaq_trader_symbols()
+        warnings.extend(fetch_warnings)
+        if fetched_symbols:
+            try:
+                settings.data_paths.ensure()
+                payload = {
+                    "symbols": fetched_symbols,
+                    "source": "nasdaq_trader",
+                    "fetched_at": now.isoformat(),
+                }
+                with cache_path.open("w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, indent=2)
+            except Exception as exc:  # pragma: no cover - cache write failure
+                warnings.append(f"Failed to write NASDAQ Trader cache: {exc}")
+            else:
+                warnings.append(
+                    "Downloaded NASDAQ Trader universe from nasdaqtrader.com.")
+            return fetched_symbols, warnings
+    elif cached_symbols:
+        warnings.append(
+            "NASDAQ Trader cache refreshed within the last 12 hours; using cached symbols."
+        )
+        return cached_symbols, warnings
+
+    if cached_symbols:
+        warnings.append(
+            "Using cached NASDAQ Trader universe symbols after download failure.")
+        return cached_symbols, warnings
+
+    return [], warnings
+
+
+def _load_cached_symbol_list(path: Path) -> tuple[List[str], List[str]]:
+    if not path.exists():
+        return [], []
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception as exc:  # pragma: no cover - defensive cache parsing
+        return [], [f"Failed to parse cached symbol list {path.name}: {exc}"]
+
+    raw_symbols = payload.get("symbols")
+    if not isinstance(raw_symbols, list):
+        return [], [f"Cached symbol list {path.name} did not contain a 'symbols' array."]
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for symbol in raw_symbols:
+        candidate = str(symbol).strip().upper()
+        if candidate and candidate not in seen:
+            normalized.append(candidate)
+            seen.add(candidate)
+
+    if not normalized:
+        return [], [f"Cached symbol list {path.name} did not contain any usable symbols."]
+
+    return sorted(normalized), []
+
+
+def _load_latest_nasdaq_symbols(settings: AppSettings) -> tuple[List[str], List[str]]:
+    warnings: List[str] = []
+    universe_path = settings.data_paths.raw / \
+        "universe" / "nasdaq" / "membership.parquet"
+
+    if universe_path.exists():
+        try:
+            snapshots = load_universe(universe_path)
+        except Exception as exc:  # pragma: no cover - defensive parsing
+            warnings.append(
+                f"Failed to load NASDAQ universe membership: {exc}")
+        else:
+            if snapshots:
+                symbols = sorted(latest_symbols(snapshots))
+                return symbols, warnings
+            warnings.append("NASDAQ universe membership is empty.")
+    else:
+        warnings.append("NASDAQ universe membership file not found.")
+
+    trader_symbols, trader_warnings = _load_nasdaq_trader_symbols(settings)
+    warnings.extend(trader_warnings)
+    if trader_symbols:
+        return trader_symbols, warnings
+
+    fallback_candidates = [
+        settings.data_paths.cache / "nasdaq_universe.json",
+        settings.data_paths.cache / "nasdaq_technology_universe.json",
+    ]
+
+    for fallback_path in fallback_candidates:
+        symbols, fallback_warnings = _load_cached_symbol_list(fallback_path)
+        warnings.extend(fallback_warnings)
+        if symbols:
+            warnings.append(
+                f"Using cached NASDAQ symbols from {fallback_path.name}.")
+            return symbols, warnings
+
+    return [], warnings
+
+
+def _load_latest_snp100_symbols(settings: AppSettings) -> tuple[List[str], List[str]]:
+    warnings: List[str] = []
+    universe_path = settings.data_paths.raw / \
+        "universe" / "snp100" / "membership.parquet"
+
+    if universe_path.exists():
+        try:
+            snapshots = load_universe(universe_path)
+        except Exception as exc:  # pragma: no cover - defensive parsing
+            warnings.append(
+                f"Failed to load S&P 100 universe membership: {exc}")
+        else:
+            if snapshots:
+                symbols = sorted(latest_symbols(snapshots))
+                return symbols, warnings
+            warnings.append("S&P 100 universe membership is empty.")
+    else:
+        warnings.append("S&P 100 universe membership file not found.")
+
+    try:
+        frame = fetch_snp100_members()
+    except Exception as exc:  # pragma: no cover - network failure path
+        warnings.append(f"Failed to download S&P 100 membership: {exc}")
+    else:
+        if not frame.empty:
+            symbols = sorted(frame["symbol"].astype(
+                str).str.upper().str.strip().unique())
+            try:
+                ingest_universe_frame(
+                    frame, settings=settings, universe_name="snp100")
+            except Exception as exc:  # pragma: no cover - cache write failure
+                warnings.append(
+                    f"Failed to persist S&P 100 membership snapshot: {exc}")
+            else:
+                warnings.append(
+                    "Downloaded S&P 100 membership from Wikipedia.")
+
+            cache_path = settings.data_paths.cache / "snp100_universe.json"
+            try:
+                settings.data_paths.ensure()
+                payload = {
+                    "symbols": symbols,
+                    "source": "snp100_wikipedia",
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                }
+                with cache_path.open("w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, indent=2)
+            except Exception as exc:  # pragma: no cover - cache write failure
+                warnings.append(f"Failed to write S&P 100 cache: {exc}")
+            return symbols, warnings
+        warnings.append("S&P 100 membership source returned no symbols.")
+
+    fallback_paths = [settings.data_paths.cache / "snp100_universe.json"]
+
+    for fallback_path in fallback_paths:
+        symbols, fallback_warnings = _load_cached_symbol_list(fallback_path)
+        warnings.extend(fallback_warnings)
+        if symbols:
+            warnings.append(
+                f"Using cached S&P 100 symbols from {fallback_path.name}.")
+            return symbols, warnings
+
+    return [], warnings
+
+
+def _fetch_polygon_history_for_symbols(
+    store: ParquetBarStore,
+    symbols: Sequence[str],
+    *,
+    lookback_years: float = 3.0,
+) -> tuple[List[str], List[str]]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        candidate = str(symbol).strip().upper()
+        if candidate and candidate not in seen:
+            normalized.append(candidate)
+            seen.add(candidate)
+
+    if not normalized:
+        return [], []
+
+    start, end = _compute_history_fetch_range(lookback_years)
+    settings = AppSettings()
+    try:
+        ingest_polygon_daily(
+            normalized,
+            start,
+            end,
+            settings=settings,
+            store=store,
+            write=True,
+        )
+    except TypeError as exc:
+        params = list(inspect.signature(ingest_polygon_daily).parameters)
+        if "store" not in params and "store_obj" in params:
+            ingest_polygon_daily(
+                normalized,
+                start,
+                end,
+                settings,
+                store,
+                True,
+            )
+        else:  # pragma: no cover - unexpected signature mismatch
+            raise exc
+    return normalized, []
+
+
+def _ensure_vcp_history_cache(
+    store_root: Path,
+    symbols: Sequence[str],
+    *,
+    lookback_years: float,
+) -> tuple[List[str], List[str]]:
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for symbol in symbols:
+        candidate = str(symbol).strip().upper()
+        if candidate and candidate not in seen:
+            normalized.append(candidate)
+            seen.add(candidate)
+
+    if not normalized:
+        return [], []
+
+    store = ParquetBarStore(store_root)
+    missing = [
+        symbol
+        for symbol in normalized
+        if not store.path_for(symbol, DEFAULT_BAR_SIZE).exists()
+    ]
+
+    if not missing:
+        return [], []
+
+    start, end = _compute_history_fetch_range(lookback_years)
+    settings = AppSettings()
+    ingest_polygon_daily(
+        missing,
+        start,
+        end,
+        settings=settings,
+        store=store,
+        write=True,
+    )
+    return missing, []
+
+
+def _compute_history_fetch_range(lookback_years: float) -> tuple[date, date]:
+    effective_years = max(float(lookback_years or 0.0), 0.25)
+    buffer_days = 45
+    total_days = max(int(ceil(effective_years * 365.0)) + buffer_days, 120)
+    end = date.today()
+    start = end - timedelta(days=total_days)
+    return start, end
 
 
 def _maybe_fetch_polygon_data(
@@ -1140,6 +2266,71 @@ def _determine_optimization_windows(
             "Insufficient history to construct backtesting window.")
 
     return (train_start, train_end), (paper_start, paper_end)
+
+
+def _serialize_momentum_result(
+    parameters: MomentumParameters, outcome: Any
+) -> Dict[str, Any]:
+    training_equity_curve = _serialize_equity_curve(
+        outcome.training_result.equity_curve
+    )
+    paper_equity_curve = _serialize_equity_curve(
+        outcome.paper_result.equity_curve
+    )
+
+    training_signals = _serialize_signals(outcome.training_result.trades)
+    paper_signals = _serialize_signals(outcome.paper_result.trades)
+
+    return {
+        "label": parameters.label(),
+        "parameters": _serialize_parameters(parameters),
+        "training_metrics": _normalize_metrics(asdict(outcome.training_metrics)),
+        "paper_metrics": _normalize_metrics(asdict(outcome.paper_metrics)),
+        "training_equity_curve": training_equity_curve,
+        "paper_equity_curve": paper_equity_curve,
+        "training_signals": training_signals,
+        "paper_signals": paper_signals,
+        "training_final_state": _serialize_portfolio_state(outcome.training_result.final_state),
+        "paper_final_state": _serialize_portfolio_state(outcome.paper_result.final_state),
+        "training_trades": _serialize_trades(outcome.training_result.trades, phase="training"),
+        "paper_trades": _serialize_trades(outcome.paper_result.trades, phase="paper"),
+    }
+
+
+def _serialize_portfolio_state(state: Any) -> Dict[str, Any]:
+    positions = [
+        {
+            "symbol": symbol,
+            "quantity": int(position.quantity),
+            "avg_price": float(position.avg_price),
+        }
+        for symbol, position in state.positions.items()
+    ]
+    positions.sort(key=lambda item: item["symbol"])
+    return {
+        "cash": float(state.cash),
+        "positions": positions,
+    }
+
+
+def _serialize_trades(trades: Iterable[Any], *, phase: str) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+    for trade in trades:
+        timestamp = _to_iso(getattr(trade, "timestamp", None))
+        entries.append(
+            {
+                "timestamp": timestamp,
+                "symbol": getattr(trade, "symbol", ""),
+                "quantity": int(getattr(trade, "quantity", 0)),
+                "price": float(getattr(trade, "price", 0.0)),
+                "cash_after": float(getattr(trade, "cash_after", 0.0)),
+                "commission": float(getattr(trade, "commission", 0.0)),
+                "slippage": float(getattr(trade, "slippage", 0.0)),
+                "phase": phase,
+            }
+        )
+    entries.sort(key=lambda entry: entry["timestamp"] or "")
+    return entries
 
 
 def _serialize_scan_candidate(candidate: VCPScanCandidate) -> Dict[str, Any]:

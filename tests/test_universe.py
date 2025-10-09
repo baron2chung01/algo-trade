@@ -78,15 +78,57 @@ def test_fetch_snp100_members_parses_table(monkeypatch):
             """Pretend the response was successful."""
 
     html = """
-    <table>
-        <tr><th>Ticker symbol</th><th>Security</th></tr>
-        <tr><td>MSFT</td><td>Microsoft</td></tr>
-        <tr><td>AAPL</td><td>Apple Inc.</td></tr>
-    </table>
+    <html>
+      <body>
+        <h2><span id="Components">Components</span></h2>
+        <table class="wikitable">
+          <thead>
+            <tr><th>Ticker symbol</th><th>Security</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>MSFT</td><td>Microsoft</td></tr>
+            <tr><td>AAPL</td><td>Apple Inc.</td></tr>
+          </tbody>
+        </table>
+        <h2><span id="See_also">See also</span></h2>
+      </body>
+    </html>
     """
 
-    def fake_get(url: str, timeout: int):  # noqa: ARG001
+    def fake_get(url: str, timeout: int, **kwargs):  # noqa: ARG001
+        assert "headers" in kwargs
         return FakeResponse(html)
+
+    monkeypatch.setattr("requests.get", fake_get)
+
+    df = fetch_snp100_members(effective_date=date(2024, 3, 1))
+    assert list(df.symbol) == ["AAPL", "MSFT"]
+    assert df.effective_date.unique().tolist() == [date(2024, 3, 1)]
+
+
+def test_fetch_snp100_members_handles_missing_components_table(monkeypatch):
+    class FakeResponse:
+        def __init__(self, text: str):
+            self.text = text
+
+        def raise_for_status(self) -> None:  # noqa: D401
+            """Pretend the response was successful."""
+
+    fallback_html = """
+    <html>
+      <body>
+        <table>
+          <tr><th>Ticker symbol</th><th>Security</th></tr>
+          <tr><td>MSFT</td><td>Microsoft</td></tr>
+          <tr><td>AAPL</td><td>Apple Inc.</td></tr>
+        </table>
+      </body>
+    </html>
+    """
+
+    def fake_get(url: str, timeout: int, **kwargs):  # noqa: ARG001
+        assert "headers" in kwargs
+        return FakeResponse(fallback_html)
 
     monkeypatch.setattr("requests.get", fake_get)
 

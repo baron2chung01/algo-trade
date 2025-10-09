@@ -10,6 +10,7 @@ from typing import Iterable
 
 import pandas as pd
 import requests
+from lxml import html as lxml_html
 
 from ..config import AppSettings
 
@@ -23,6 +24,16 @@ class UniverseSnapshot:
 
 
 DEFAULT_SNP100_SOURCE = "https://en.wikipedia.org/wiki/S%26P_100"
+DEFAULT_WIKIPEDIA_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+}
 
 
 def _validate_universe_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -98,31 +109,92 @@ def fetch_snp100_members(
 ) -> pd.DataFrame:
     """Fetch the current S&P 100 membership from Wikipedia.
 
-    Returns a DataFrame with columns ``effective_date`` and ``symbol``.
+    Parses the *Components* section table so structural changes elsewhere on the page
+    do not affect the result. Returns a DataFrame with columns ``effective_date`` and
+    ``symbol``.
     """
 
-    response = requests.get(source_url, timeout=15)
+    headers = {**DEFAULT_WIKIPEDIA_HEADERS, "Referer": source_url}
+    response = requests.get(source_url, timeout=15, headers=headers)
     response.raise_for_status()
-    tables = pd.read_html(StringIO(response.text))
 
-    table = None
-    for candidate in tables:
-        if {"Ticker symbol", "Security"}.issubset(candidate.columns):
-            table = candidate
-            break
+    document = lxml_html.fromstring(response.text)
+    table_html = _extract_components_table_html(document)
 
+    dataframes: list[pd.DataFrame] = []
+    if table_html:
+        dataframes = pd.read_html(StringIO(table_html))
+    if not dataframes:
+        # Fall back to scanning the entire document to maintain backwards compatibility.
+        dataframes = pd.read_html(StringIO(response.text))
+
+    table = _select_symbol_table(dataframes)
     if table is None:
         raise ValueError(
-            "Unable to locate S&P 100 constituent table in source document")
+            "Unable to locate S&P 100 component table in source document")
 
-    df = table.rename(columns={"Ticker symbol": "symbol"})
-    df = df[["symbol"]]
+    table = _normalize_component_table(table)
+    eff_date = effective_date or date.today()
+    table["effective_date"] = eff_date
+    table = table[["effective_date", "symbol"]]
+    return _validate_universe_frame(table)
+
+
+def _extract_components_table_html(document: lxml_html.HtmlElement) -> str | None:
+    components = document.xpath("//span[@id='Components']")
+    if not components:
+        return None
+
+    heading = components[0].getparent()
+    if heading is None:
+        return None
+
+    node = heading.getnext()
+    while node is not None:
+        tag = getattr(node, "tag", "")
+        if not isinstance(tag, str):
+            node = node.getnext()
+            continue
+        lowered = tag.lower()
+        if lowered == "table":
+            return lxml_html.tostring(node, encoding="unicode")
+        if lowered in {"h2", "h3"}:
+            break
+        node = node.getnext()
+    return None
+
+
+def _select_symbol_table(tables: Iterable[pd.DataFrame]) -> pd.DataFrame | None:
+    for table in tables:
+        normalized_columns = [
+            " ".join(col).strip().lower() if isinstance(
+                col, tuple) else str(col).strip().lower()
+            for col in table.columns
+        ]
+        if any("symbol" in column for column in normalized_columns):
+            return table
+    return None
+
+
+def _normalize_component_table(table: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        " ".join(col).strip() if isinstance(col, tuple) else str(col).strip()
+        for col in table.columns
+    ]
+    table = table.copy()
+    table.columns = columns
+
+    symbol_column = next(
+        (column for column in table.columns if "symbol" in column.lower()),
+        None,
+    )
+    if symbol_column is None:
+        raise ValueError("Components table missing a symbol column")
+
+    df = table[[symbol_column]].rename(columns={symbol_column: "symbol"})
     df["symbol"] = df["symbol"].astype(str).str.upper().str.strip()
     df = df[df["symbol"] != ""].drop_duplicates(subset=["symbol"])
-    eff_date = effective_date or date.today()
-    df["effective_date"] = eff_date
-    df = df[["effective_date", "symbol"]]
-    return _validate_universe_frame(df)
+    return df
 
 
 def load_universe(target_path: Path) -> list[UniverseSnapshot]:

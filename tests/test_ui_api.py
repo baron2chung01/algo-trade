@@ -1,8 +1,10 @@
 from datetime import date, datetime, timedelta, timezone
 from math import sin
 
+import pandas as pd
 from fastapi.testclient import TestClient
 
+from algotrade.config import AppSettings as RealAppSettings, DataPaths
 from algotrade.data.schemas import IBKRBar, IBKRBarDataFrame
 from algotrade.data.stores.local import ParquetBarStore
 from algotrade.ui import create_app
@@ -262,3 +264,164 @@ def test_vcp_scan_export_allows_custom_route():
     assert response.status_code == 200
     lines = response.text.strip().splitlines()
     assert lines == ["SYM,SPY,SMART/ARCA"]
+
+
+def test_snp100_endpoint_uses_cached_membership(tmp_path, monkeypatch):
+    raw_dir = tmp_path / "raw"
+    cache_dir = tmp_path / "cache"
+    membership_dir = raw_dir / "universe" / "snp100"
+    membership_dir.mkdir(parents=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    df = pd.DataFrame(
+        {
+            "effective_date": [date(2024, 1, 1), date(2024, 1, 1)],
+            "symbol": ["AAPL", "MSFT"],
+        }
+    )
+    df.to_parquet(membership_dir / "membership.parquet", index=False)
+
+    store = ParquetBarStore(tmp_path / "bars")
+    start_date = date.today() - timedelta(days=30)
+    store.save("AAPL", "1d", _build_bars([150.0, 151.0], start_date))
+
+    fetch_calls: list[list[str]] = []
+
+    def _mock_fetch(store_obj, symbols, lookback_years=3.0):  # noqa: ARG001
+        fetch_calls.append(list(symbols))
+        return [], []
+
+    def _custom_settings() -> RealAppSettings:
+        settings = RealAppSettings()
+        settings.data_paths = DataPaths(raw=raw_dir, cache=cache_dir)
+        return settings
+
+    monkeypatch.setattr("algotrade.ui.app.AppSettings", _custom_settings)
+    monkeypatch.setattr(
+        "algotrade.ui.app._fetch_polygon_history_for_symbols", _mock_fetch
+    )
+
+    client = TestClient(create_app())
+    response = client.get(
+        "/api/universe/snp100",
+        params={"store_path": str(store.root)},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbols"] == ["AAPL", "MSFT"]
+    assert payload.get("missing") == ["MSFT"]
+    assert fetch_calls == [["MSFT"]]
+
+
+def test_snp100_endpoint_fetches_missing_history(tmp_path, monkeypatch):
+    raw_dir = tmp_path / "raw"
+    cache_dir = tmp_path / "cache"
+    membership_dir = raw_dir / "universe" / "snp100"
+    membership_dir.mkdir(parents=True)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    df = pd.DataFrame(
+        {
+            "effective_date": [date(2024, 1, 1), date(2024, 1, 1)],
+            "symbol": ["AAPL", "MSFT"],
+        }
+    )
+    df.to_parquet(membership_dir / "membership.parquet", index=False)
+
+    store = ParquetBarStore(tmp_path / "bars")
+
+    def _mock_fetch(store_obj, symbols, lookback_years=3.0):  # noqa: ARG001
+        for symbol in symbols:
+            offset_days = int(lookback_years * 365 // 2) or 1
+            store_obj.save(
+                symbol,
+                "1d",
+                _build_bars([100.0], date.today() -
+                            timedelta(days=offset_days)),
+            )
+        return list(symbols), []
+
+    def _custom_settings() -> RealAppSettings:
+        settings = RealAppSettings()
+        settings.data_paths = DataPaths(raw=raw_dir, cache=cache_dir)
+        return settings
+
+    monkeypatch.setattr("algotrade.ui.app.AppSettings", _custom_settings)
+    monkeypatch.setattr(
+        "algotrade.ui.app._fetch_polygon_history_for_symbols", _mock_fetch
+    )
+
+    client = TestClient(create_app())
+    response = client.get(
+        "/api/universe/snp100",
+        params={"store_path": str(store.root)},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbols"] == ["AAPL", "MSFT"]
+    assert "missing" not in payload or not payload["missing"]
+    assert payload.get("fetched") == ["AAPL", "MSFT"]
+
+
+def test_import_fetch_endpoint_downloads_missing_history(tmp_path, monkeypatch):
+    store = ParquetBarStore(tmp_path / "bars")
+    start_date = date.today() - timedelta(days=30)
+    store.save("AAPL", "1d", _build_bars([150.0, 151.0], start_date))
+
+    recorded: dict[str, list[str]] = {}
+
+    def fake_ingest(symbols, start, end, settings, store_obj, write):  # noqa: ARG001
+        recorded["symbols"] = list(symbols)
+        for symbol in symbols:
+            store_obj.save(
+                symbol,
+                "1d",
+                _build_bars([125.0, 126.0], date.today() - timedelta(days=10)),
+            )
+
+    monkeypatch.setattr("algotrade.ui.app.ingest_polygon_daily", fake_ingest)
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/universe/import/fetch",
+        json={
+            "symbols": ["AAPL", "MSFT"],
+            "store_path": str(store.root),
+            "lookback_years": 1.0,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["requested"] == ["AAPL", "MSFT"]
+    assert payload["fetched"] == ["MSFT"]
+    assert payload["missing"] == []
+    assert recorded["symbols"] == ["MSFT"]
+
+
+def test_import_fetch_endpoint_skips_when_all_cached(tmp_path, monkeypatch):
+    store = ParquetBarStore(tmp_path / "bars")
+    start_date = date.today() - timedelta(days=30)
+    store.save("AAPL", "1d", _build_bars([150.0], start_date))
+    store.save("MSFT", "1d", _build_bars([200.0], start_date))
+
+    def fake_ingest(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("ingest_polygon_daily should not be called")
+
+    monkeypatch.setattr("algotrade.ui.app.ingest_polygon_daily", fake_ingest)
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/universe/import/fetch",
+        json={
+            "symbols": ["AAPL", "MSFT"],
+            "store_path": str(store.root),
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["fetched"] == []
+    assert payload["missing"] == []
