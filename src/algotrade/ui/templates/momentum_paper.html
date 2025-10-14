@@ -1,0 +1,159 @@
+{% extends "base.html" %} {% block title %}Momentum Paper Trading{% endblock %} {% block page_id %}momentum-paper{% endblock %} {% block head_scripts %}
+<script src="https://cdn.plot.ly/plotly-2.30.0.min.js" defer></script>
+{% endblock %} {% block footer_scripts %}
+<script src="/static/app.js" type="module" defer></script>
+{% endblock %} {% block content %}
+<section class="layout momentum-layout momentum-layout--paper">
+  <aside class="control-panel">
+    <form id="momentum-paper-form" class="control-form">
+      <div class="form-section">
+        <h2 class="form-section-title">Universe Source</h2>
+        <p class="form-help">
+          By default the S&amp;P&nbsp;100 membership cached in the data directory will be used. Provide custom tickers if you'd like to override the universe.
+        </p>
+        <label>
+          Custom symbols (optional)
+          <input id="paper-symbols" name="symbols" type="text" placeholder="e.g. AAPL, MSFT, NVDA" />
+        </label>
+        <label class="form-checkbox">
+          <input id="paper-auto-fetch" name="auto_fetch" type="checkbox" />
+          <span>Download missing Polygon history automatically</span>
+        </label>
+      </div>
+
+      <div class="form-section">
+        <h2 class="form-section-title">Capital & Windows</h2>
+        <p class="form-help">Training and paper windows default to the past two years / one year split but can be adjusted.</p>
+        <div class="form-grid">
+          <label>
+            Initial cash ($)
+            <input id="paper-initial-cash" name="initial_cash" type="number" min="1000" step="1000" value="10000" />
+          </label>
+          <label>
+            Training start
+            <input id="paper-training-start" name="training_start" type="date" />
+          </label>
+          <label>
+            Training end
+            <input id="paper-training-end" name="training_end" type="date" />
+          </label>
+          <label>
+            Paper start
+            <input id="paper-paper-start" name="paper_start" type="date" />
+          </label>
+          <label>
+            Paper end
+            <input id="paper-paper-end" name="paper_end" type="date" />
+          </label>
+        </div>
+      </div>
+
+      <div class="form-section">
+        <h2 class="form-section-title">Momentum Parameters</h2>
+        <p class="form-help">Defaults mirror the optimal configuration discovered via optimization but you may fine-tune them before initiating the run.</p>
+        <div class="form-grid parameter-grid" id="paper-parameter-grid">
+          <label>
+            Lookback days
+            <input name="lookback_days" type="number" min="1" step="1" value="126" />
+          </label>
+          <label>
+            Skip days
+            <input name="skip_days" type="number" min="0" step="1" value="0" />
+          </label>
+          <label>
+            Rebalance every (days)
+            <input name="rebalance_days" type="number" min="1" step="1" value="5" />
+          </label>
+          <label>
+            Max positions
+            <input name="max_positions" type="number" min="1" step="1" value="10" />
+          </label>
+          <label>
+            Lot size
+            <input name="lot_size" type="number" min="1" step="1" value="1" />
+          </label>
+          <label>
+            Cash reserve (%)
+            <input name="cash_reserve_pct" type="number" min="0" max="95" step="1" value="5" />
+          </label>
+          <label>
+            Minimum momentum (z-score)
+            <input name="min_momentum" type="number" step="0.01" value="0.04" />
+          </label>
+          <label>
+            Volatility window (days)
+            <input name="volatility_window" type="number" min="1" step="1" value="20" />
+          </label>
+          <label>
+            Volatility exponent
+            <input name="volatility_exponent" type="number" min="0" step="0.05" value="1.25" />
+          </label>
+        </div>
+        <label class="form-checkbox">
+          <input id="paper-execute-orders" name="execute_orders" type="checkbox" />
+          <span>Submit resulting trades to IBKR paper account (requires running TWS Gateway)</span>
+        </label>
+      </div>
+
+      <button id="paper-run" type="submit" class="button">Run Paper Trade Simulation</button>
+      <div class="status" id="paper-status"></div>
+    </form>
+  </aside>
+
+  <section class="metrics" id="paper-metrics-section">
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Paper Metrics</h3>
+        <span id="paper-window-label" class="metric-window"></span>
+      </div>
+      <div class="metric-grid" id="paper-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Training Metrics</h3>
+        <span id="paper-training-window-label" class="metric-window"></span>
+      </div>
+      <div class="metric-grid" id="paper-training-metrics"></div>
+    </div>
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Trade Signals</h3>
+      </div>
+      <div class="table-scroll">
+        <table id="paper-trade-table">
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Symbol</th>
+              <th>Direction</th>
+              <th>Quantity</th>
+              <th>Price</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="metric-group" id="paper-actions-group" hidden>
+      <div class="metric-group-header">
+        <h3>Action Log</h3>
+      </div>
+      <ul class="metric-list" id="paper-action-list"></ul>
+    </div>
+    <div class="metric-group" id="paper-warnings-group" hidden>
+      <div class="metric-group-header">
+        <h3>Warnings</h3>
+      </div>
+      <ul class="metric-list" id="paper-warning-list"></ul>
+    </div>
+  </section>
+
+  <section class="chart-container">
+    <div class="chart-header">
+      <h2>Equity Curves</h2>
+    </div>
+    <div id="paper-training-chart" class="chart"></div>
+    <div id="paper-paper-chart" class="chart"></div>
+  </section>
+</section>
+{% endblock %}

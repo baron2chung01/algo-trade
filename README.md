@@ -153,6 +153,7 @@ python -m scripts.run_ui --store-path data/raw/quantconnect/daily --port 8000
 - The page overlays buy markers on top of candlesticks, streams the cumulative equity curve, and highlights metrics such as net profit, total return, and drawdown.
 - Adjust the `--store-path` flag (or `ALGO_TRADE_STORE_PATH` environment variable) to point at the Parquet cache containing historical bars.
 - On the VCP page, pick between an exhaustive grid search or the new simulated annealing optimizer. Grid runs every combination in your parameter ranges, while annealing samples the search space using the iteration, temperature, and cooling settings exposed in the form.
+- Momentum live trading now limits executions to the current session, checks existing IBKR holdings before issuing new buys, and gracefully falls back to Polygon previous-close prices if the last-trade endpoint returns HTTP 403.
 
 ## Repository layout (work in progress)
 

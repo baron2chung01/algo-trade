@@ -49,6 +49,8 @@ class AppSettings(BaseSettings):
     ibkr_host: str = Field(default="127.0.0.1", alias="IBKR_HOST")
     ibkr_port: int = Field(default=7497, alias="IBKR_PORT")
     ibkr_client_id: int = Field(default=101, alias="IBKR_CLIENT_ID")
+    ibkr_account: str | None = Field(default=None, alias="IBKR_ACCOUNT")
+    ibkr_base_currency: str = Field(default="USD", alias="IBKR_BASE_CURRENCY")
     data_paths: DataPaths = Field(default_factory=DataPaths)
 
     def require_quantconnect_credentials(self) -> QuantConnectCredentials:

@@ -256,6 +256,11 @@ a:hover {
   color: #facc15;
 }
 
+.badge--new {
+  background: rgba(56, 189, 248, 0.2);
+  color: #38bdf8;
+}
+
 .button {
   display: inline-flex;
   align-items: center;
@@ -373,9 +378,6 @@ a:hover {
   padding: 1rem 1.2rem;
   border-radius: 14px;
   border: 1px solid rgba(148, 163, 184, 0.18);
-.form-actions .button {
-  /* Removed unused styles */
-}
 
 .form-section--params {
   grid-column: 1 / -1;
@@ -870,7 +872,8 @@ textarea::placeholder {
 #scan-table,
 #vcp-test-table,
 #momentum-ranking-table,
-#momentum-trade-table {
+#momentum-trade-table,
+#live-history-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 0.85rem;
@@ -885,7 +888,9 @@ textarea::placeholder {
 #momentum-ranking-table th,
 #momentum-ranking-table td,
 #momentum-trade-table th,
-#momentum-trade-table td {
+#momentum-trade-table td,
+#live-history-table th,
+#live-history-table td {
   padding: 0.6rem 0.75rem;
   text-align: left;
   border-bottom: 1px solid rgba(148, 163, 184, 0.2);
@@ -895,7 +900,8 @@ textarea::placeholder {
 #scan-table th,
 #vcp-test-table th,
 #momentum-ranking-table th,
-#momentum-trade-table th {
+#momentum-trade-table th,
+#live-history-table th {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   font-size: 0.75rem;
@@ -916,13 +922,19 @@ textarea::placeholder {
 #ranking-table tr:last-child td,
 #vcp-test-table tr:last-child td,
 #momentum-ranking-table tr:last-child td,
-#momentum-trade-table tr:last-child td {
+#momentum-trade-table tr:last-child td,
+#live-history-table tr:last-child td {
   border-bottom: none;
 }
 
 #vcp-test-table tr.is-active td {
   background: rgba(99, 102, 241, 0.12);
   box-shadow: inset 0 0 0 1px rgba(99, 102, 241, 0.28);
+}
+
+#live-history-table tr.is-active td {
+  background: rgba(14, 165, 233, 0.14);
+  box-shadow: inset 0 0 0 1px rgba(56, 189, 248, 0.25);
 }
 
 .chart-container {

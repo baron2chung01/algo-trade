@@ -5,6 +5,22 @@ const STRATEGY_VCP = "vcp";
 const STRATEGY_MOMENTUM = "momentum";
 const MOMENTUM_MODE_BACKTEST = "backtest";
 const MOMENTUM_MODE_OPTIMIZE = "optimize";
+const MOMENTUM_PAPER_DEFAULT_PARAMETERS = {
+    lookback_days: 126,
+    skip_days: 0,
+    rebalance_days: 5,
+    max_positions: 10,
+    lot_size: 1,
+    cash_reserve_pct: 0.05,
+    min_momentum: 0.04,
+    volatility_window: 20,
+    volatility_exponent: 1.25,
+};
+
+const MOMENTUM_LIVE_STATUS_POLL_MS = 5000;
+const MOMENTUM_LIVE_HISTORY_POLL_MS = 12000;
+const MOMENTUM_LIVE_MIN_INTERVAL_MINUTES = 1;
+const MOMENTUM_LIVE_MAX_INTERVAL_MINUTES = 24 * 60;
 
 const pageId = document.body?.dataset?.page || "";
 
@@ -95,6 +111,63 @@ const momentumElements = {
     parameterSection: document.getElementById("momentum-parameter-section"),
 };
 
+const momentumPaperElements = {
+    form: document.getElementById("momentum-paper-form"),
+    status: document.getElementById("paper-status"),
+    runButton: document.getElementById("paper-run"),
+    symbolsInput: document.getElementById("paper-symbols"),
+    autoFetchToggle: document.getElementById("paper-auto-fetch"),
+    executeToggle: document.getElementById("paper-execute-orders"),
+    initialCashInput: document.getElementById("paper-initial-cash"),
+    trainingStartInput: document.getElementById("paper-training-start"),
+    trainingEndInput: document.getElementById("paper-training-end"),
+    paperStartInput: document.getElementById("paper-paper-start"),
+    paperEndInput: document.getElementById("paper-paper-end"),
+    parameterGrid: document.getElementById("paper-parameter-grid"),
+    metrics: document.getElementById("paper-metrics"),
+    trainingMetrics: document.getElementById("paper-training-metrics"),
+    paperWindowLabel: document.getElementById("paper-window-label"),
+    trainingWindowLabel: document.getElementById("paper-training-window-label"),
+    tradeTableBody: document.querySelector("#paper-trade-table tbody"),
+    actionsGroup: document.getElementById("paper-actions-group"),
+    actionsList: document.getElementById("paper-action-list"),
+    warningsGroup: document.getElementById("paper-warnings-group"),
+    warningsList: document.getElementById("paper-warning-list"),
+    trainingChart: document.getElementById("paper-training-chart"),
+    paperChart: document.getElementById("paper-paper-chart"),
+};
+
+const momentumLiveElements = {
+    form: document.getElementById("momentum-live-form"),
+    status: document.getElementById("live-status"),
+    startButton: document.getElementById("live-start"),
+    stopButton: document.getElementById("live-stop"),
+    intervalInput: document.getElementById("live-interval"),
+    symbolsInput: document.getElementById("live-symbols"),
+    autoFetchToggle: document.getElementById("live-auto-fetch"),
+    executeToggle: document.getElementById("live-execute-orders"),
+    parameterGrid: document.getElementById("live-parameter-grid"),
+    statusBadge: document.getElementById("live-status-badge"),
+    iterations: document.getElementById("live-iterations"),
+    lastRun: document.getElementById("live-last-run"),
+    nextRun: document.getElementById("live-next-run"),
+    configCash: document.getElementById("live-config-cash"),
+    historyTableBody: document.querySelector("#live-history-table tbody"),
+    actionsGroup: document.getElementById("live-actions-group"),
+    actionsList: document.getElementById("live-actions"),
+    warningsGroup: document.getElementById("live-warnings-group"),
+    warningsList: document.getElementById("live-warnings"),
+    tradeDate: document.getElementById("live-trade-date"),
+    tradeTableBody: document.querySelector("#live-trade-table tbody"),
+    portfolioGroup: document.getElementById("live-portfolio-group"),
+    portfolioCash: document.getElementById("live-portfolio-cash"),
+    portfolioPositionCount: document.getElementById("live-portfolio-position-count"),
+    portfolioTableBody: document.getElementById("live-portfolio-positions-body"),
+    tradeHistoryTableBody: document.querySelector("#live-trade-history-table tbody"),
+    historyResetButton: document.getElementById("live-history-reset"),
+    equityChart: document.getElementById("live-equity-chart"),
+};
+
 const meanReversionControls = {
     stopRangeToggle: document.getElementById("use_stop_range"),
     stopRangeInputs: document.querySelectorAll("[data-stop-range]"),
@@ -143,6 +216,10 @@ let latestData = null;
 let latestScanResult = null;
 let latestVcpTest = null;
 let latestMomentum = null;
+let latestMomentumPaper = null;
+let latestMomentumLive = null;
+let momentumLiveStatusTimer = null;
+let momentumLiveHistoryTimer = null;
 let currentMomentumMode = MOMENTUM_MODE_BACKTEST;
 let currentUniverseSource = "cache";
 let currentUniverseSymbols = [...DEFAULT_SYMBOLS];
@@ -157,6 +234,16 @@ function initialize() {
 
     if (pageId === "momentum") {
         initializeMomentumPage();
+        return;
+    }
+
+    if (pageId === "momentum-paper") {
+        initializeMomentumPaperPage();
+        return;
+    }
+
+    if (pageId === "momentum-live") {
+        initializeMomentumLivePage();
         return;
     }
 
@@ -393,6 +480,85 @@ function initializeMomentumPage() {
     }
 
     applyMomentumMode(readMomentumMode());
+}
+
+function initializeMomentumPaperPage() {
+    if (!momentumPaperElements.form) {
+        return;
+    }
+
+    populatePaperDefaults();
+    momentumPaperElements.form.addEventListener("submit", runMomentumPaperTrade);
+    setPaperStatus("Configure parameters and run to simulate IBKR paper trading signals.", "info");
+}
+
+function initializeMomentumLivePage() {
+    if (!momentumLiveElements.form) {
+        return;
+    }
+
+    momentumLiveElements.form.addEventListener("submit", startMomentumLiveTrading);
+    if (momentumLiveElements.stopButton) {
+        momentumLiveElements.stopButton.addEventListener("click", stopMomentumLiveTrading);
+    }
+    if (momentumLiveElements.historyResetButton) {
+        momentumLiveElements.historyResetButton.addEventListener("click", resetMomentumLiveHistory);
+    }
+
+    disableLiveStartButton(false);
+    disableLiveStopButton(true);
+
+    setLiveStatus("Configure the live daemon and start to begin scheduled IBKR paper trades.", "info");
+
+    refreshMomentumLiveStatus();
+    refreshMomentumLiveHistory();
+    startMomentumLivePolling();
+
+    window.addEventListener("beforeunload", stopMomentumLivePolling);
+}
+
+function populatePaperDefaults() {
+    prefillPaperDates();
+    if (!momentumPaperElements.parameterGrid) {
+        return;
+    }
+    const inputs = momentumPaperElements.parameterGrid.querySelectorAll("input[name]");
+    inputs.forEach((input) => {
+        const key = input.name;
+        if (Object.prototype.hasOwnProperty.call(MOMENTUM_PAPER_DEFAULT_PARAMETERS, key)) {
+            const value = MOMENTUM_PAPER_DEFAULT_PARAMETERS[key];
+            if (input.name === "cash_reserve_pct") {
+                input.value = Number((value * 100).toFixed(2));
+            } else {
+                input.value = value;
+            }
+        }
+    });
+}
+
+function prefillPaperDates() {
+    const { trainingStartInput, trainingEndInput, paperStartInput, paperEndInput } = momentumPaperElements;
+    if (!trainingStartInput || !trainingEndInput || !paperStartInput || !paperEndInput) {
+        return;
+    }
+    if (trainingStartInput.value && trainingEndInput.value && paperStartInput.value && paperEndInput.value) {
+        return;
+    }
+
+    const today = new Date();
+    const paperEnd = today;
+    const paperStart = new Date(paperEnd);
+    paperStart.setDate(paperStart.getDate() - 365);
+
+    const trainingEnd = new Date(paperStart);
+    trainingEnd.setDate(trainingEnd.getDate() - 1);
+    const trainingStart = new Date(trainingEnd);
+    trainingStart.setDate(trainingStart.getDate() - 730);
+
+    trainingStartInput.valueAsDate = trainingStart;
+    trainingEndInput.valueAsDate = trainingEnd;
+    paperStartInput.valueAsDate = paperStart;
+    paperEndInput.valueAsDate = paperEnd;
 }
 
 function prefillMomentumDates() {
@@ -1173,6 +1339,1118 @@ function renderMomentumTrades(result) {
       `;
         })
         .join("");
+}
+
+async function runMomentumPaperTrade(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    if (!momentumPaperElements.form) {
+        return;
+    }
+
+    const formData = new FormData(momentumPaperElements.form);
+    let request;
+    try {
+        request = buildMomentumPaperRequest(formData);
+    } catch (error) {
+        console.error("Failed to build momentum paper request", error);
+        setPaperStatus(error?.message || "Unable to build paper trading request.", "error");
+        return;
+    }
+
+    setPaperStatus("Running momentum paper trade simulation…", "info");
+    disablePaperRunButton(true);
+
+    try {
+        const response = await fetch(request.endpoint, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(request.payload),
+        });
+
+        if (!response.ok) {
+            const errorMessage = await readErrorMessage(response);
+            throw new Error(errorMessage || `Request failed with status ${response.status}`);
+        }
+
+        const data = await response.json();
+        renderMomentumPaperResult(data);
+
+        const tradeCount = Array.isArray(data?.paper_trades) ? data.paper_trades.length : 0;
+        const actionCount = Array.isArray(data?.actions) ? data.actions.length : 0;
+        const autoFetchLabel = request.payload.auto_fetch ? " with auto-fetch" : "";
+        setPaperStatus(
+            `Paper trade simulation complete${autoFetchLabel}. Signals generated: ${tradeCount}. Actions recorded: ${actionCount}.`,
+            "success",
+        );
+    } catch (error) {
+        console.error("Failed to run momentum paper trade", error);
+        setPaperStatus(error?.message || "Failed to run momentum paper trade.", "error");
+    } finally {
+        disablePaperRunButton(false);
+    }
+}
+
+function buildMomentumPaperRequest(formData) {
+    const payload = {};
+
+    const initialCash = parseFloatOr(formData.get("initial_cash"), 10000);
+    if (!Number.isFinite(initialCash) || initialCash <= 0) {
+        throw new Error("Initial cash must be a positive number.");
+    }
+    payload.initial_cash = Number(initialCash.toFixed(2));
+
+    const symbolInput = formData.get("symbols") || "";
+    const customSymbols = parseSymbolList(symbolInput);
+    if (customSymbols.length) {
+        payload.symbols = Array.from(new Set(customSymbols));
+    }
+
+    const autoFetch = formData.has("auto_fetch");
+    payload.auto_fetch = autoFetch;
+
+    const executeOrders = formData.has("execute_orders");
+    payload.execute_orders = executeOrders;
+
+    const trainingStart = (formData.get("training_start") || "").toString().trim();
+    const trainingEnd = (formData.get("training_end") || "").toString().trim();
+    const paperStart = (formData.get("paper_start") || "").toString().trim();
+    const paperEnd = (formData.get("paper_end") || "").toString().trim();
+
+    const hasTrainingDates = trainingStart && trainingEnd;
+    const hasPaperDates = paperStart && paperEnd;
+    if ((trainingStart && !trainingEnd) || (!trainingStart && trainingEnd)) {
+        throw new Error("Both training start and end dates must be provided.");
+    }
+    if ((paperStart && !paperEnd) || (!paperStart && paperEnd)) {
+        throw new Error("Both paper start and end dates must be provided.");
+    }
+
+    if (hasTrainingDates) {
+        const startDate = new Date(trainingStart);
+        const endDate = new Date(trainingEnd);
+        if (!(startDate instanceof Date && !Number.isNaN(startDate.valueOf()))) {
+            throw new Error("Training start date is invalid.");
+        }
+        if (!(endDate instanceof Date && !Number.isNaN(endDate.valueOf()))) {
+            throw new Error("Training end date is invalid.");
+        }
+        if (startDate >= endDate) {
+            throw new Error("Training start must be before training end.");
+        }
+        payload.training_window = [trainingStart, trainingEnd];
+    }
+
+    if (hasPaperDates) {
+        const startDate = new Date(paperStart);
+        const endDate = new Date(paperEnd);
+        if (!(startDate instanceof Date && !Number.isNaN(startDate.valueOf()))) {
+            throw new Error("Paper start date is invalid.");
+        }
+        if (!(endDate instanceof Date && !Number.isNaN(endDate.valueOf()))) {
+            throw new Error("Paper end date is invalid.");
+        }
+        if (startDate >= endDate) {
+            throw new Error("Paper start must be before paper end.");
+        }
+        payload.paper_window = [paperStart, paperEnd];
+    }
+
+    const parameters = buildPaperMomentumParameters(formData);
+    payload.parameters = [parameters];
+
+    return {
+        endpoint: "/api/momentum/paper-trade",
+        payload,
+    };
+}
+
+function buildPaperMomentumParameters(formData) {
+    const getInt = (name, fallback, min = Number.NEGATIVE_INFINITY) => {
+        const value = parseIntOr(formData.get(name), fallback);
+        if (!Number.isFinite(value)) {
+            throw new Error(`${formatParameterLabel(name)} must be a number.`);
+        }
+        if (value < min) {
+            throw new Error(`${formatParameterLabel(name)} must be at least ${min}.`);
+        }
+        return value;
+    };
+
+    const getFloat = (name, fallback, min = Number.NEGATIVE_INFINITY, max = Number.POSITIVE_INFINITY) => {
+        const value = parseFloatOr(formData.get(name), fallback);
+        if (!Number.isFinite(value)) {
+            throw new Error(`${formatParameterLabel(name)} must be a number.`);
+        }
+        if (value < min) {
+            throw new Error(`${formatParameterLabel(name)} must be at least ${min}.`);
+        }
+        if (value > max) {
+            throw new Error(`${formatParameterLabel(name)} must be at most ${max}.`);
+        }
+        return value;
+    };
+
+    const lookbackDays = getInt("lookback_days", MOMENTUM_PAPER_DEFAULT_PARAMETERS.lookback_days, 1);
+    const skipDays = getInt("skip_days", MOMENTUM_PAPER_DEFAULT_PARAMETERS.skip_days, 0);
+    const rebalanceDays = getInt("rebalance_days", MOMENTUM_PAPER_DEFAULT_PARAMETERS.rebalance_days, 1);
+    const maxPositions = getInt("max_positions", MOMENTUM_PAPER_DEFAULT_PARAMETERS.max_positions, 1);
+    const lotSize = getInt("lot_size", MOMENTUM_PAPER_DEFAULT_PARAMETERS.lot_size, 1);
+    const cashReservePct = getFloat("cash_reserve_pct", MOMENTUM_PAPER_DEFAULT_PARAMETERS.cash_reserve_pct * 100, 0, 95);
+    const minMomentum = getFloat("min_momentum", MOMENTUM_PAPER_DEFAULT_PARAMETERS.min_momentum, -10, 10);
+    const volatilityWindow = getInt("volatility_window", MOMENTUM_PAPER_DEFAULT_PARAMETERS.volatility_window, 1);
+    const volatilityExponent = getFloat("volatility_exponent", MOMENTUM_PAPER_DEFAULT_PARAMETERS.volatility_exponent, 0, 10);
+
+    if (skipDays >= lookbackDays) {
+        throw new Error("Skip days must be less than lookback days.");
+    }
+
+    return {
+        lookback_days: lookbackDays,
+        skip_days: skipDays,
+        rebalance_days: rebalanceDays,
+        max_positions: maxPositions,
+        lot_size: lotSize,
+        cash_reserve_pct: Math.max(0, Math.min(cashReservePct / 100, 0.95)),
+        min_momentum: Number(minMomentum.toFixed(4)),
+        volatility_window: volatilityWindow,
+        volatility_exponent: Number(volatilityExponent.toFixed(4)),
+    };
+}
+
+function renderMomentumPaperResult(data) {
+    latestMomentumPaper = data;
+
+    const evaluation = data?.evaluation || null;
+    const paperWindow = data?.paper_window || null;
+    const trainingWindow = data?.training_window || null;
+
+    if (momentumPaperElements.paperWindowLabel) {
+        momentumPaperElements.paperWindowLabel.textContent = paperWindow ? `Window: ${formatRange(paperWindow)}` : "";
+    }
+    if (momentumPaperElements.trainingWindowLabel) {
+        momentumPaperElements.trainingWindowLabel.textContent = trainingWindow ? `Window: ${formatRange(trainingWindow)}` : "";
+    }
+
+    renderMetricCards(momentumPaperElements.metrics, buildMetricRows(evaluation?.paper_metrics));
+    renderMetricCards(momentumPaperElements.trainingMetrics, buildMetricRows(evaluation?.training_metrics));
+    renderPaperTrades(data);
+    renderPaperActions(data?.actions || []);
+    renderPaperWarnings(data?.warnings || [], data?.fetched_symbols || []);
+    renderPaperCharts(evaluation);
+}
+
+function renderPaperTrades(data) {
+    if (!momentumPaperElements.tradeTableBody) {
+        return;
+    }
+    const trades = Array.isArray(data?.paper_trades) ? data.paper_trades : [];
+    if (!trades.length) {
+        momentumPaperElements.tradeTableBody.innerHTML =
+            '<tr><td colspan="5" class="metric-empty">No trade signals generated.</td></tr>';
+        return;
+    }
+
+    const rows = trades
+        .map((trade) => {
+            const quantity = Number(trade?.quantity || 0);
+            const direction = quantity > 0 ? "Buy" : quantity < 0 ? "Sell" : "Hold";
+            return `
+        <tr>
+          <td>${trade?.timestamp || ""}</td>
+          <td>${trade?.symbol || ""}</td>
+          <td>${direction}</td>
+          <td>${Math.abs(quantity)}</td>
+          <td>${formatCurrency(trade?.price)}</td>
+        </tr>
+      `;
+        })
+        .join("");
+    momentumPaperElements.tradeTableBody.innerHTML = rows;
+}
+
+async function startMomentumLiveTrading(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    if (!momentumLiveElements.form) {
+        return;
+    }
+
+    let payload;
+    try {
+        payload = buildMomentumLiveRequest(new FormData(momentumLiveElements.form));
+    } catch (error) {
+        setLiveStatus(error?.message || "Unable to build live trading request.", "error");
+        return;
+    }
+
+    setLiveStatus("Starting live trading daemon…", "info");
+    disableLiveStartButton(true);
+
+    try {
+        const response = await fetch("/api/momentum/live/start", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+            const message = await readErrorMessage(response);
+            throw new Error(message || `Request failed with status ${response.status}`);
+        }
+
+        const data = await response.json();
+        renderMomentumLiveStatus(data);
+        setLiveStatus("Live trading daemon is running.", "success");
+        disableLiveStopButton(false);
+        refreshMomentumLiveHistory();
+    } catch (error) {
+        console.error("Failed to start momentum live trading", error);
+        setLiveStatus(error?.message || "Failed to start live trading.", "error");
+        disableLiveStartButton(false);
+    }
+}
+
+async function stopMomentumLiveTrading(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    disableLiveStopButton(true);
+    setLiveStatus("Stopping live trading daemon…", "info");
+
+    try {
+        const response = await fetch("/api/momentum/live/stop", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+        });
+
+        if (!response.ok) {
+            const message = await readErrorMessage(response);
+            throw new Error(message || `Request failed with status ${response.status}`);
+        }
+
+        const data = await response.json();
+        renderMomentumLiveStatus(data);
+        setLiveStatus("Live trading daemon stopped.", "success");
+    } catch (error) {
+        console.error("Failed to stop momentum live trading", error);
+        setLiveStatus(error?.message || "Failed to stop live trading.", "error");
+    } finally {
+        disableLiveStartButton(false);
+        disableLiveStopButton(true);
+    }
+}
+
+function buildMomentumLiveRequest(formData) {
+    const payload = {};
+
+    const intervalMinutes = parseIntOr(formData.get("interval_minutes"), MOMENTUM_LIVE_MIN_INTERVAL_MINUTES);
+    if (!Number.isFinite(intervalMinutes) || intervalMinutes < MOMENTUM_LIVE_MIN_INTERVAL_MINUTES) {
+        throw new Error(`Interval must be at least ${MOMENTUM_LIVE_MIN_INTERVAL_MINUTES} minute(s).`);
+    }
+    if (intervalMinutes > MOMENTUM_LIVE_MAX_INTERVAL_MINUTES) {
+        throw new Error("Interval is too large. Choose a shorter cadence.");
+    }
+    payload.interval_seconds = intervalMinutes * 60;
+
+    const symbols = parseSymbolList(formData.get("symbols") || "");
+    if (symbols.length) {
+        payload.symbols = Array.from(new Set(symbols));
+    }
+
+    payload.auto_fetch = formData.has("auto_fetch");
+    payload.execute_orders = formData.has("execute_orders");
+
+    payload.parameters = [readLiveMomentumParameters(formData)];
+
+    return payload;
+}
+
+function readLiveMomentumParameters(formData) {
+    if (!momentumLiveElements.parameterGrid) {
+        return MOMENTUM_PAPER_DEFAULT_PARAMETERS;
+    }
+    const parameterInputs = momentumLiveElements.parameterGrid.querySelectorAll("input[name]");
+    const values = {};
+    parameterInputs.forEach((input) => {
+        const name = input.name;
+        const raw = formData.get(name) ?? input.value;
+        const number = Number.parseFloat(raw);
+        if (!Number.isFinite(number)) {
+            return;
+        }
+        if (name === "cash_reserve_pct") {
+            values[name] = Math.max(0, Math.min(number / 100, 0.95));
+        } else if (["lookback_days", "rebalance_days", "max_positions", "lot_size", "volatility_window"].includes(name)) {
+            values[name] = Math.max(1, Math.round(number));
+        } else if (name === "skip_days") {
+            values[name] = Math.max(0, Math.round(number));
+        } else {
+            values[name] = Number(number.toFixed(4));
+        }
+    });
+
+    return { ...MOMENTUM_PAPER_DEFAULT_PARAMETERS, ...values };
+}
+
+function renderPaperActions(actions) {
+    if (!momentumPaperElements.actionsGroup || !momentumPaperElements.actionsList) {
+        return;
+    }
+    const entries = Array.isArray(actions)
+        ? actions
+            .map((action) => describePaperAction(action))
+            .filter((message) => typeof message === "string" && message.trim())
+        : [];
+
+    if (!entries.length) {
+        momentumPaperElements.actionsGroup.hidden = true;
+        momentumPaperElements.actionsList.innerHTML = "";
+        return;
+    }
+
+    momentumPaperElements.actionsList.innerHTML = entries.map((item) => `<li>${item}</li>`).join("");
+    momentumPaperElements.actionsGroup.hidden = false;
+}
+
+function renderPaperWarnings(warnings, fetchedSymbols) {
+    if (!momentumPaperElements.warningsGroup || !momentumPaperElements.warningsList) {
+        return;
+    }
+
+    const messages = [];
+    if (Array.isArray(fetchedSymbols) && fetchedSymbols.length) {
+        messages.push(`Auto-downloaded Polygon data for: ${fetchedSymbols.join(", ")}.`);
+    }
+    if (Array.isArray(warnings)) {
+        warnings.forEach((warning) => {
+            if (!warning) {
+                return;
+            }
+            if (typeof warning === "string") {
+                messages.push(warning);
+            } else if (warning.label && warning.reason) {
+                messages.push(`${warning.label}: ${warning.reason}`);
+            } else if (warning.reason) {
+                messages.push(warning.reason);
+            }
+        });
+    }
+
+    if (!messages.length) {
+        momentumPaperElements.warningsGroup.hidden = true;
+        momentumPaperElements.warningsList.innerHTML = "";
+        return;
+    }
+
+    momentumPaperElements.warningsList.innerHTML = messages.map((item) => `<li>${item}</li>`).join("");
+    momentumPaperElements.warningsGroup.hidden = false;
+}
+
+function renderPaperCharts(result) {
+    if (!momentumPaperElements.trainingChart || !momentumPaperElements.paperChart) {
+        return;
+    }
+
+    const trainingCurve = Array.isArray(result?.training_equity_curve) ? result.training_equity_curve : [];
+    const paperCurve = Array.isArray(result?.paper_equity_curve) ? result.paper_equity_curve : [];
+
+    if (!trainingCurve.length) {
+        Plotly.purge(momentumPaperElements.trainingChart);
+    } else {
+        const trainingTrace = {
+            type: "scatter",
+            mode: "lines",
+            name: "Training Equity",
+            x: trainingCurve.map((point) => point.timestamp),
+            y: trainingCurve.map((point) => point.equity),
+            line: { color: "#2563eb", width: 3 },
+        };
+        Plotly.newPlot(
+            momentumPaperElements.trainingChart,
+            [trainingTrace],
+            {
+                margin: { t: 40, r: 10, b: 50, l: 60 },
+                xaxis: { title: "Date" },
+                yaxis: { title: "Equity" },
+                hovermode: "x unified",
+            },
+            { responsive: true, displaylogo: false },
+        );
+    }
+
+    if (!paperCurve.length) {
+        Plotly.purge(momentumPaperElements.paperChart);
+    } else {
+        const paperTrace = {
+            type: "scatter",
+            mode: "lines",
+            name: "Paper Equity",
+            x: paperCurve.map((point) => point.timestamp),
+            y: paperCurve.map((point) => point.equity),
+            line: { color: "#22c55e", width: 3 },
+        };
+        Plotly.newPlot(
+            momentumPaperElements.paperChart,
+            [paperTrace],
+            {
+                margin: { t: 40, r: 10, b: 50, l: 60 },
+                xaxis: { title: "Date" },
+                yaxis: { title: "Equity" },
+                hovermode: "x unified",
+            },
+            { responsive: true, displaylogo: false },
+        );
+    }
+}
+
+function renderMomentumLiveStatus(status) {
+    latestMomentumLive = {
+        ...(latestMomentumLive || {}),
+        status,
+    };
+
+    const running = Boolean(status?.running);
+    disableLiveStartButton(running);
+    disableLiveStopButton(!running);
+
+    if (momentumLiveElements.statusBadge) {
+        const current = String(status?.status || "idle");
+        const label = current.charAt(0).toUpperCase() + current.slice(1);
+        momentumLiveElements.statusBadge.textContent = label;
+        let badgeClass = "badge";
+        if (running && current === "running") {
+            badgeClass += " badge--done";
+        } else if (!running) {
+            badgeClass += " badge--todo";
+        }
+        momentumLiveElements.statusBadge.className = badgeClass;
+    }
+
+    if (momentumLiveElements.iterations) {
+        momentumLiveElements.iterations.textContent = formatNumber(status?.iterations, 0);
+    }
+    if (momentumLiveElements.lastRun) {
+        momentumLiveElements.lastRun.textContent = formatDateTime(status?.last_run_at);
+    }
+    if (momentumLiveElements.nextRun) {
+        momentumLiveElements.nextRun.textContent = formatDateTime(status?.next_run_at);
+    }
+
+    const config = status?.config;
+    if (config) {
+        if (momentumLiveElements.intervalInput) {
+            momentumLiveElements.intervalInput.value = Math.round((config.interval_seconds || 0) / 60) || 30;
+        }
+        if (momentumLiveElements.autoFetchToggle) {
+            momentumLiveElements.autoFetchToggle.checked = Boolean(config.auto_fetch);
+        }
+        if (momentumLiveElements.executeToggle) {
+            momentumLiveElements.executeToggle.checked = Boolean(config.execute_orders);
+        }
+        if (Array.isArray(config.symbols) && momentumLiveElements.symbolsInput) {
+            momentumLiveElements.symbolsInput.value = config.symbols.join(", ");
+        }
+        if (momentumLiveElements.configCash) {
+            const cash = Number(config.initial_cash ?? Number.NaN);
+            momentumLiveElements.configCash.textContent = Number.isFinite(cash) ? formatCurrency(cash) : "–";
+        }
+    } else if (momentumLiveElements.configCash) {
+        momentumLiveElements.configCash.textContent = "–";
+    }
+
+    if (momentumLiveElements.tradeDate && status?.config?.trade_date) {
+        momentumLiveElements.tradeDate.textContent = formatDate(status.config.trade_date);
+    }
+}
+
+function renderMomentumLiveHistory(history) {
+    latestMomentumLive = {
+        ...(latestMomentumLive || {}),
+        history,
+    };
+
+    const runs = Array.isArray(history?.runs) ? history.runs : [];
+    const tradeHistory = Array.isArray(history?.trade_history) ? history.trade_history : [];
+    const equityPoints = Array.isArray(history?.equity_curve) ? history.equity_curve : [];
+    if (momentumLiveElements.historyTableBody) {
+        if (!runs.length) {
+            momentumLiveElements.historyTableBody.innerHTML =
+                '<tr><td colspan="5" class="metric-empty">No runs recorded yet.</td></tr>';
+        } else {
+            momentumLiveElements.historyTableBody.innerHTML = runs
+                .map((run) => {
+                    const status = (run.status || "").toString();
+                    const badgeClass = status === "completed" ? "badge--done" : status === "error" ? "badge--todo" : "";
+                    const statusBadge = `<span class="badge ${badgeClass}">${status.toUpperCase()}</span>`;
+                    return `
+            <tr>
+              <td>${run.run_id || "–"}</td>
+              <td>${formatDateTime(run.started_at)}</td>
+              <td>${statusBadge}</td>
+              <td>${formatNumber(run.trade_count, 0)}</td>
+              <td>${formatNumber(run.order_count, 0)}</td>
+            </tr>
+          `;
+                })
+                .join("");
+        }
+    }
+
+    const latestRun = runs[runs.length - 1];
+    if (latestRun) {
+        renderMomentumLiveTrades(latestRun);
+        renderMomentumLiveWarnings(latestRun);
+        renderMomentumLivePortfolio(latestRun);
+    } else {
+        renderMomentumLiveTrades(null);
+        renderMomentumLiveWarnings(null);
+        renderMomentumLivePortfolio(null);
+    }
+
+    renderMomentumLiveTradeHistoryTable(tradeHistory);
+    renderMomentumLiveEquityCurve(equityPoints);
+    if (momentumLiveElements.historyResetButton) {
+        momentumLiveElements.historyResetButton.disabled = !tradeHistory.length && !runs.length;
+    }
+}
+
+function renderMomentumLiveWarnings(run) {
+    const warnings = run?.warnings || [];
+    const actions = run?.actions || [];
+    if (momentumLiveElements.warningsGroup && momentumLiveElements.warningsList) {
+        const warningMessages = Array.isArray(warnings)
+            ? warnings
+                .map((warning) => (typeof warning === "string" ? warning : warning?.reason || ""))
+                .filter(Boolean)
+            : [];
+
+        const runError = typeof run?.error === "string" && run.error.trim() ? run.error.trim() : null;
+        if (runError) {
+            warningMessages.unshift(`Live iteration failed: ${runError}`);
+        }
+
+        if (warningMessages.length) {
+            momentumLiveElements.warningsList.innerHTML = warningMessages.map((message) => `<li>${message}</li>`).join("");
+            momentumLiveElements.warningsGroup.hidden = false;
+        } else {
+            momentumLiveElements.warningsGroup.hidden = true;
+            momentumLiveElements.warningsList.innerHTML = "";
+        }
+    }
+
+    if (momentumLiveElements.actionsGroup && momentumLiveElements.actionsList) {
+        const actionMessages = Array.isArray(actions)
+            ? actions
+                .map((action) => describePaperAction(action))
+                .filter((message) => typeof message === "string" && message.trim())
+            : [];
+
+        if (actionMessages.length) {
+            momentumLiveElements.actionsList.innerHTML = actionMessages.map((message) => `<li>${message}</li>`).join("");
+            momentumLiveElements.actionsGroup.hidden = false;
+        } else {
+            momentumLiveElements.actionsGroup.hidden = true;
+            momentumLiveElements.actionsList.innerHTML = "";
+        }
+    }
+}
+
+function renderMomentumLiveTrades(run) {
+    if (!momentumLiveElements.tradeTableBody) {
+        return;
+    }
+
+    const trades = Array.isArray(run?.paper_trades) ? run.paper_trades : [];
+    if (!trades.length) {
+        momentumLiveElements.tradeTableBody.innerHTML =
+            '<tr><td colspan="6" class="metric-empty">No trades submitted this run.</td></tr>';
+    } else {
+        momentumLiveElements.tradeTableBody.innerHTML = trades
+            .map((trade) => {
+                const timestamp = formatDateTime(trade.timestamp);
+                const symbol = (trade.symbol || "").toString().toUpperCase();
+                const requestedQuantity = Number(trade.quantity || 0);
+                const executionQuantityRaw = typeof trade.execution_filled_quantity === "number"
+                    ? Number(trade.execution_filled_quantity)
+                    : Number.NaN;
+                const hasExecutionQuantity = Number.isFinite(executionQuantityRaw);
+                const quantityValue = hasExecutionQuantity ? executionQuantityRaw : requestedQuantity;
+                const direction = quantityValue > 0
+                    ? "Buy"
+                    : quantityValue < 0
+                        ? "Sell"
+                        : requestedQuantity > 0
+                            ? "Buy"
+                            : requestedQuantity < 0
+                                ? "Sell"
+                                : "Hold";
+                const displayQuantity = formatNumber(Math.abs(quantityValue || requestedQuantity), 0);
+                const executionPriceRaw = typeof trade.execution_price === "number" && Number.isFinite(trade.execution_price)
+                    ? trade.execution_price
+                    : Number(trade.price);
+                const hasExecutionPrice = Number.isFinite(executionPriceRaw);
+                const paperPrice = typeof trade.paper_price === "number" && Number.isFinite(trade.paper_price)
+                    ? trade.paper_price
+                    : null;
+                let priceDisplay = hasExecutionPrice ? formatCurrency(executionPriceRaw) : "–";
+                if (paperPrice !== null && hasExecutionPrice && Math.abs(executionPriceRaw - paperPrice) > 0.01) {
+                    priceDisplay = `${priceDisplay} (sim ${formatCurrency(paperPrice)})`;
+                }
+                const cashAfter = formatCurrency(trade.cash_after);
+                return `
+        <tr>
+          <td>${timestamp}</td>
+          <td>${symbol}</td>
+          <td>${direction}</td>
+          <td>${displayQuantity}</td>
+          <td>${priceDisplay}</td>
+          <td>${cashAfter}</td>
+        </tr>
+      `;
+            })
+            .join("");
+    }
+
+    if (momentumLiveElements.tradeDate) {
+        const tradeDate = run?.trade_date || null;
+        momentumLiveElements.tradeDate.textContent = tradeDate ? formatDate(tradeDate) : "–";
+    }
+}
+
+function renderMomentumLivePortfolio(run) {
+    const portfolio = run?.portfolio && typeof run.portfolio === "object" ? run.portfolio : null;
+    const cashValue = typeof portfolio?.cash === "number" ? portfolio.cash : null;
+    const positions = Array.isArray(portfolio?.positions) ? portfolio.positions : [];
+
+    if (momentumLiveElements.portfolioCash) {
+        momentumLiveElements.portfolioCash.textContent = cashValue !== null ? formatCurrency(cashValue) : "–";
+    }
+
+    if (momentumLiveElements.portfolioPositionCount) {
+        momentumLiveElements.portfolioPositionCount.textContent = formatNumber(positions.length, 0);
+    }
+
+    if (momentumLiveElements.portfolioTableBody) {
+        if (!positions.length) {
+            momentumLiveElements.portfolioTableBody.innerHTML =
+                '<tr><td colspan="3" class="metric-empty">No open positions.</td></tr>';
+        } else {
+            momentumLiveElements.portfolioTableBody.innerHTML = positions
+                .map((position) => {
+                    const symbol = (position.symbol || "").toString().toUpperCase();
+                    const quantity = formatNumber(position.quantity || 0, 0);
+                    const price = formatCurrency(position.avg_price || 0);
+                    return `
+        <tr>
+          <td>${symbol}</td>
+          <td>${quantity}</td>
+          <td>${price}</td>
+        </tr>
+      `;
+                })
+                .join("");
+        }
+    }
+
+    if (momentumLiveElements.portfolioGroup) {
+        momentumLiveElements.portfolioGroup.hidden = false;
+    }
+}
+
+function renderMomentumLiveTradeHistoryTable(trades) {
+    const body = momentumLiveElements.tradeHistoryTableBody;
+    if (!body) {
+        return;
+    }
+
+    if (!Array.isArray(trades) || !trades.length) {
+        body.innerHTML = '<tr><td colspan="8" class="metric-empty">No recorded trades yet.</td></tr>';
+        return;
+    }
+
+    const coerceNumber = (value) => {
+        if (typeof value === "number") {
+            return Number.isFinite(value) ? value : null;
+        }
+        const parsed = parseFloat(value);
+        return Number.isFinite(parsed) ? parsed : null;
+    };
+
+    const rows = trades
+        .slice()
+        .sort((a, b) => {
+            const timeA = new Date(a?.timestamp || a?.trade_date || 0).getTime();
+            const timeB = new Date(b?.timestamp || b?.trade_date || 0).getTime();
+            return timeA - timeB;
+        })
+        .map((trade) => {
+            const tradeDate = trade?.trade_date || trade?.timestamp;
+            const direction = (trade?.direction || "").toString();
+            const quantityValue = coerceNumber(trade?.quantity ?? trade?.signed_quantity);
+            const priceCandidates = [trade?.price, trade?.execution_price, trade?.paper_price];
+            const executionPrice = priceCandidates.reduce((acc, value) => {
+                if (acc !== null) {
+                    return acc;
+                }
+                return coerceNumber(value);
+            }, null);
+            const paperPrice = coerceNumber(trade?.paper_price);
+            let priceDisplay = executionPrice !== null ? formatCurrency(executionPrice) : "–";
+            if (
+                paperPrice !== null &&
+                executionPrice !== null &&
+                Math.abs(executionPrice - paperPrice) > 0.01
+            ) {
+                priceDisplay = `${priceDisplay} (sim ${formatCurrency(paperPrice)})`;
+            }
+
+            const cashAfter = coerceNumber(trade?.cash_after);
+            const runId = (trade?.run_id || "–").toString();
+
+            return `
+        <tr>
+          <td>${formatDate(tradeDate)}</td>
+          <td>${formatDateTime(trade?.timestamp)}</td>
+          <td>${(trade?.symbol || "").toString().toUpperCase()}</td>
+          <td>${direction ? direction.charAt(0).toUpperCase() + direction.slice(1) : ""}</td>
+          <td>${formatNumber(quantityValue, 0)}</td>
+          <td>${priceDisplay}</td>
+          <td>${formatCurrency(cashAfter)}</td>
+          <td>${runId}</td>
+        </tr>
+      `;
+        })
+        .join("");
+
+    body.innerHTML = rows;
+}
+
+function renderMomentumLiveEquityCurve(points) {
+    const chart = momentumLiveElements.equityChart;
+    if (!chart) {
+        return;
+    }
+
+    if (!Array.isArray(points) || !points.length) {
+        if (typeof Plotly !== "undefined") {
+            Plotly.purge(chart);
+        }
+        chart.innerHTML = '<div class="metric-empty">No equity data recorded yet.</div>';
+        return;
+    }
+
+    chart.innerHTML = "";
+
+    if (typeof Plotly === "undefined") {
+        return;
+    }
+
+    const sorted = points
+        .slice()
+        .filter((point) => point && point.timestamp)
+        .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+    if (!sorted.length) {
+        Plotly.purge(chart);
+        chart.innerHTML = '<div class="metric-empty">No equity data recorded yet.</div>';
+        return;
+    }
+
+    const timestamps = sorted.map((point) => point.timestamp);
+    const totalAssets = sorted.map((point) => (Number.isFinite(point.total_assets) ? point.total_assets : null));
+    const cashAvailable = sorted.map((point) =>
+        Number.isFinite(point.cash_available) ? point.cash_available : null,
+    );
+
+    const traces = [
+        {
+            type: "scatter",
+            mode: "lines",
+            name: "Total Assets",
+            x: timestamps,
+            y: totalAssets,
+            line: { color: "#2563eb", width: 3 },
+        },
+    ];
+
+    if (cashAvailable.some((value) => value !== null)) {
+        traces.push({
+            type: "scatter",
+            mode: "lines",
+            name: "Cash Available",
+            x: timestamps,
+            y: cashAvailable,
+            line: { color: "#22c55e", width: 2, dash: "dot" },
+        });
+    }
+
+    Plotly.newPlot(
+        chart,
+        traces,
+        {
+            margin: { t: 40, r: 10, b: 50, l: 60 },
+            xaxis: { title: "Timestamp" },
+            yaxis: { title: "Value (USD)", tickprefix: "$" },
+            hovermode: "x unified",
+            legend: { orientation: "h" },
+        },
+        { responsive: true, displaylogo: false },
+    );
+}
+
+async function resetMomentumLiveHistory(event) {
+    if (event) {
+        event.preventDefault();
+    }
+
+    const button = momentumLiveElements.historyResetButton;
+    if (!button) {
+        return;
+    }
+    if (!button.dataset.originalLabel) {
+        button.dataset.originalLabel = button.textContent?.trim() || "Hard Reset";
+    }
+    if (button.disabled) {
+        return;
+    }
+
+    const confirmReset = window.confirm(
+        "This will erase all recorded live trades and equity history. Continue?",
+    );
+    if (!confirmReset) {
+        return;
+    }
+
+    button.disabled = true;
+    button.textContent = "Resetting…";
+    setLiveStatus("Resetting live trade history…", "info");
+
+    try {
+        const response = await fetch("/api/momentum/live/history/reset", {
+            method: "POST",
+        });
+        if (!response.ok) {
+            const errorMessage = await readErrorMessage(response);
+            throw new Error(errorMessage);
+        }
+        const data = await response.json();
+        const warnings = Array.isArray(data?.warnings)
+            ? data.warnings
+                .map((message) => (typeof message === "string" ? message.trim() : ""))
+                .filter(Boolean)
+            : [];
+        const statusMessage = warnings.length
+            ? `History reset with warnings: ${warnings.join(" | ")}`
+            : "Live trade history reset.";
+        setLiveStatus(statusMessage, warnings.length ? "warning" : "success");
+        refreshMomentumLiveHistory();
+    } catch (error) {
+        console.error("Failed to reset live history", error);
+        setLiveStatus(error?.message || "Failed to reset live history.", "error");
+    } finally {
+        button.disabled = false;
+        button.textContent = button.dataset.originalLabel || "Hard Reset";
+    }
+}
+
+function describePaperAction(action) {
+    if (!action || typeof action !== "object") {
+        return "";
+    }
+    const type = action.type;
+    switch (type) {
+        case "universe_loaded": {
+            const source = action.source || "universe";
+            const count = action.symbol_count || (Array.isArray(action.symbols) ? action.symbols.length : 0);
+            return `Loaded ${count} symbols from ${source}.`;
+        }
+        case "parameters_prepared":
+            return "Momentum parameters prepared for execution.";
+        case "history_fetched": {
+            const symbols = Array.isArray(action.symbols) ? action.symbols.join(", ") : "requested universe";
+            return `Fetched Polygon history for ${symbols}.`;
+        }
+        case "experiment_run": {
+            const training = action.training_window ? formatRange(action.training_window) : "training window";
+            const paper = action.paper_window ? formatRange(action.paper_window) : "paper window";
+            return `Backtested over ${training} and paper tested over ${paper}.`;
+        }
+        case "trade_signal": {
+            if (action.status === "no_trades") {
+                return "No trades generated for the paper window.";
+            }
+            const direction = action.direction || "trade";
+            const symbol = action.symbol || "symbol";
+            const quantity = Math.abs(action.quantity || 0);
+            return `${direction === "buy" ? "Buy" : "Sell"} ${quantity} ${symbol} @ ${formatCurrency(action.price)}.`;
+        }
+        case "ibkr_connect":
+            return `Connecting to IBKR TWS (client ${action.client_id ?? ""})…`;
+        case "ibkr_order_submitted": {
+            const direction = action.direction || "order";
+            const symbol = action.symbol || "symbol";
+            const quantity = action.quantity || 0;
+            return `Submitted ${direction} order for ${quantity} ${symbol} to IBKR.`;
+        }
+        case "ibkr_order_status": {
+            const symbol = action.symbol || "symbol";
+            const status = (action.status || "unknown").toString();
+            const fillCount = Number.isFinite(action.fill_count) ? action.fill_count : action.filled ? 1 : 0;
+            const filled = Boolean(action.filled);
+            const orderId = action.order_id ?? "?";
+            const fillLabel = filled ? "filled" : `pending (${fillCount} fills)`;
+            const quantity = Number.isFinite(action.filled_quantity) ? Math.abs(action.filled_quantity) : null;
+            const avgPrice = typeof action.avg_price === "number" && Number.isFinite(action.avg_price)
+                ? formatCurrency(action.avg_price)
+                : null;
+            const details = [];
+            if (quantity !== null) {
+                details.push(`${formatNumber(quantity, 0)} shares`);
+            }
+            if (avgPrice) {
+                details.push(`@ ${avgPrice}`);
+            }
+            const suffix = details.length ? ` (${details.join(", ")})` : "";
+            return `Order ${orderId} for ${symbol} ${fillLabel}${suffix} [status: ${status}].`;
+        }
+        case "ibkr_execution_recorded": {
+            const symbol = action.symbol || "symbol";
+            const executionPrice = typeof action.execution_price === "number" && Number.isFinite(action.execution_price)
+                ? formatCurrency(action.execution_price)
+                : "latest IBKR fill";
+            const previousPrice = typeof action.previous_price === "number" && Number.isFinite(action.previous_price)
+                ? formatCurrency(action.previous_price)
+                : null;
+            const quantity = Number.isFinite(action.execution_filled_quantity)
+                ? formatNumber(Math.abs(action.execution_filled_quantity), 0)
+                : null;
+            const parts = [];
+            if (quantity) {
+                parts.push(`${quantity} shares`);
+            }
+            if (previousPrice) {
+                parts.push(`sim ${previousPrice}`);
+            }
+            const extra = parts.length ? ` (${parts.join(", ")})` : "";
+            const status = action.status ? ` [${action.status}]` : "";
+            return `Recorded IBKR fill for ${symbol}: ${executionPrice}${extra}.${status}`;
+        }
+        case "polygon_quote_fetch": {
+            const status = action.status || "unknown";
+            const count = Number.isFinite(action.symbol_count) ? Number(action.symbol_count) : null;
+            const reason = action.reason ? ` (${action.reason})` : "";
+            const countLabel = count !== null ? `${formatNumber(count, 0)} symbols` : "symbols";
+            return `Fetching Polygon quotes for ${countLabel}: ${status}${reason}.`;
+        }
+        case "polygon_quote": {
+            const symbol = action.symbol || "symbol";
+            const status = action.status || "unknown";
+            if (status === "ok") {
+                const price = typeof action.price === "number" && Number.isFinite(action.price)
+                    ? formatCurrency(action.price)
+                    : "n/a";
+                const timestamp = action.timestamp ? formatDateTime(action.timestamp) : null;
+                const tsLabel = timestamp ? ` @ ${timestamp}` : "";
+                return `Polygon quote ${symbol}: ${price}${tsLabel}.`;
+            }
+            const message = action.message ? ` (${action.message})` : "";
+            return `Polygon quote ${symbol} ${status}.${message}`;
+        }
+        case "ibkr_execution_skipped":
+            return "IBKR execution skipped.";
+        case "ibkr_execution_failed":
+            return `IBKR execution failed: ${action.message || "Unknown error"}.`;
+        case "ibkr_disconnect":
+            return "Disconnected from IBKR.";
+        default:
+            return JSON.stringify(action);
+    }
+}
+
+function setPaperStatus(message, level = "info") {
+    if (!momentumPaperElements.status) {
+        return;
+    }
+    momentumPaperElements.status.textContent = message;
+    momentumPaperElements.status.className = `status ${level}`;
+}
+
+function setLiveStatus(message, level = "info") {
+    if (!momentumLiveElements.status) {
+        return;
+    }
+    momentumLiveElements.status.textContent = message;
+    momentumLiveElements.status.className = `status ${level}`;
+}
+
+function disableLiveStartButton(disabled) {
+    if (momentumLiveElements.startButton) {
+        momentumLiveElements.startButton.disabled = disabled;
+        momentumLiveElements.startButton.classList.toggle("button--disabled", disabled);
+    }
+}
+
+function disableLiveStopButton(disabled) {
+    if (momentumLiveElements.stopButton) {
+        momentumLiveElements.stopButton.disabled = disabled;
+        momentumLiveElements.stopButton.classList.toggle("button--disabled", disabled);
+    }
+}
+
+function startMomentumLivePolling() {
+    stopMomentumLivePolling();
+    momentumLiveStatusTimer = window.setInterval(refreshMomentumLiveStatus, MOMENTUM_LIVE_STATUS_POLL_MS);
+    momentumLiveHistoryTimer = window.setInterval(refreshMomentumLiveHistory, MOMENTUM_LIVE_HISTORY_POLL_MS);
+}
+
+function stopMomentumLivePolling() {
+    if (momentumLiveStatusTimer) {
+        window.clearInterval(momentumLiveStatusTimer);
+        momentumLiveStatusTimer = null;
+    }
+    if (momentumLiveHistoryTimer) {
+        window.clearInterval(momentumLiveHistoryTimer);
+        momentumLiveHistoryTimer = null;
+    }
+}
+
+async function refreshMomentumLiveStatus() {
+    try {
+        const response = await fetch("/api/momentum/live/status", { cache: "no-store" });
+        if (!response.ok) {
+            throw new Error(await readErrorMessage(response));
+        }
+        const data = await response.json();
+        renderMomentumLiveStatus(data);
+    } catch (error) {
+        console.warn("Failed to refresh live status", error);
+        setLiveStatus(error?.message || "Unable to refresh live status.", "warning");
+    }
+}
+
+async function refreshMomentumLiveHistory() {
+    try {
+        const response = await fetch("/api/momentum/live/history", { cache: "no-store" });
+        if (!response.ok) {
+            throw new Error(await readErrorMessage(response));
+        }
+        const data = await response.json();
+        renderMomentumLiveHistory(data);
+    } catch (error) {
+        console.warn("Failed to refresh live history", error);
+    }
+}
+
+function disablePaperRunButton(disabled) {
+    if (momentumPaperElements.runButton) {
+        momentumPaperElements.runButton.disabled = disabled;
+    }
 }
 
 function resetScanResults() {

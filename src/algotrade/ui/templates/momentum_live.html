@@ -1,0 +1,242 @@
+{% extends "base.html" %} {% block title %}Momentum Live Trading{% endblock %} {% block page_id %}momentum-live{% endblock %} {% block head_scripts %}
+<script src="https://cdn.plot.ly/plotly-2.30.0.min.js" defer></script>
+{% endblock %} {% block footer_scripts %}
+<script src="/static/app.js" type="module" defer></script>
+{% endblock %} {% block content %}
+<section class="layout momentum-layout momentum-layout--live">
+  <aside class="control-panel">
+    <form id="momentum-live-form" class="control-form">
+      <div class="form-section">
+        <h2 class="form-section-title">Automation Controls</h2>
+        <p class="form-help">
+          Configure the live paper trading daemon. The service re-runs the momentum rotation on a schedule and submits orders to the IBKR paper account when enabled. Initial cash
+          is auto-detected from the IBKR paper account balance.
+        </p>
+        <div class="form-grid">
+          <label>
+            Interval (minutes)
+            <input id="live-interval" name="interval_minutes" type="number" min="1" step="1" value="30" />
+          </label>
+        </div>
+        <label>
+          Custom symbols (optional)
+          <input id="live-symbols" name="symbols" type="text" placeholder="e.g. AAPL, MSFT, NVDA" />
+        </label>
+        <label class="form-checkbox">
+          <input id="live-auto-fetch" name="auto_fetch" type="checkbox" />
+          <span>Auto-download missing Polygon history</span>
+        </label>
+        <label class="form-checkbox">
+          <input id="live-execute-orders" name="execute_orders" type="checkbox" checked />
+          <span>Submit generated trades to IBKR paper account</span>
+        </label>
+      </div>
+
+      <div class="form-section">
+        <h2 class="form-section-title">Momentum Parameters</h2>
+        <p class="form-help">Defaults mirror the optimized configuration. Adjust before starting the service if you need a custom live profile.</p>
+        <div class="form-grid parameter-grid" id="live-parameter-grid">
+          <label>
+            Lookback days
+            <input name="lookback_days" type="number" min="1" step="1" value="126" />
+          </label>
+          <label>
+            Skip days
+            <input name="skip_days" type="number" min="0" step="1" value="0" />
+          </label>
+          <label>
+            Rebalance every (days)
+            <input name="rebalance_days" type="number" min="1" step="1" value="5" />
+          </label>
+          <label>
+            Max positions
+            <input name="max_positions" type="number" min="1" step="1" value="10" />
+          </label>
+          <label>
+            Lot size
+            <input name="lot_size" type="number" min="1" step="1" value="1" />
+          </label>
+          <label>
+            Cash reserve (%)
+            <input name="cash_reserve_pct" type="number" min="0" max="95" step="1" value="5" />
+          </label>
+          <label>
+            Minimum momentum (z-score)
+            <input name="min_momentum" type="number" step="0.01" value="0.04" />
+          </label>
+          <label>
+            Volatility window (days)
+            <input name="volatility_window" type="number" min="1" step="1" value="20" />
+          </label>
+          <label>
+            Volatility exponent
+            <input name="volatility_exponent" type="number" min="0" step="0.05" value="1.25" />
+          </label>
+        </div>
+      </div>
+
+      <div class="form-buttons">
+        <button id="live-start" type="submit" class="button">Start Live Trading</button>
+        <button id="live-stop" type="button" class="button button--secondary">Stop</button>
+      </div>
+      <div class="status" id="live-status"></div>
+    </form>
+  </aside>
+
+  <section class="metrics momentum-live-dashboard">
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Status</h3>
+        <span id="live-status-badge" class="badge">Idle</span>
+      </div>
+      <dl class="metric-definition">
+        <div>
+          <dt>Iterations</dt>
+          <dd id="live-iterations">0</dd>
+        </div>
+        <div>
+          <dt>Last run</dt>
+          <dd id="live-last-run">–</dd>
+        </div>
+        <div>
+          <dt>Next run ETA</dt>
+          <dd id="live-next-run">–</dd>
+        </div>
+        <div>
+          <dt>IBKR Cash</dt>
+          <dd id="live-config-cash">–</dd>
+        </div>
+      </dl>
+    </div>
+
+    <div class="metric-group" id="live-portfolio-group">
+      <div class="metric-group-header">
+        <h3>Portfolio Snapshot</h3>
+        <span class="metric-subtitle">Live cash &amp; positions</span>
+      </div>
+      <dl class="metric-definition">
+        <div>
+          <dt>Cash</dt>
+          <dd id="live-portfolio-cash">–</dd>
+        </div>
+        <div>
+          <dt>Open positions</dt>
+          <dd id="live-portfolio-position-count">0</dd>
+        </div>
+      </dl>
+      <div class="table-scroll">
+        <table id="live-portfolio-positions">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Quantity</th>
+              <th>Avg Price</th>
+            </tr>
+          </thead>
+          <tbody id="live-portfolio-positions-body">
+            <tr>
+              <td colspan="3" class="metric-empty">No open positions.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Run History</h3>
+      </div>
+      <div class="table-scroll">
+        <table id="live-history-table">
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Started</th>
+              <th>Status</th>
+              <th>Trades</th>
+              <th>Orders</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Latest Trades</h3>
+        <span class="metric-subtitle">Trade date: <span id="live-trade-date">–</span></span>
+      </div>
+      <div class="table-scroll">
+        <table id="live-trade-table">
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Symbol</th>
+              <th>Direction</th>
+              <th>Quantity</th>
+              <th>Price</th>
+              <th>Cash After</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td colspan="6" class="metric-empty">No trades submitted this run.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Trade History</h3>
+        <button id="live-history-reset" type="button" class="button button--secondary">Hard Reset</button>
+      </div>
+      <div class="table-scroll">
+        <table id="live-trade-history-table">
+          <thead>
+            <tr>
+              <th>Date</th>
+              <th>Timestamp</th>
+              <th>Symbol</th>
+              <th>Direction</th>
+              <th>Quantity</th>
+              <th>Price</th>
+              <th>Cash After</th>
+              <th>Run</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td colspan="8" class="metric-empty">No recorded trades yet.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="metric-group">
+      <div class="metric-group-header">
+        <h3>Equity Curve</h3>
+        <span class="metric-subtitle">Aggregated live performance</span>
+      </div>
+      <div id="live-equity-chart" class="chart"></div>
+    </div>
+
+    <div class="metric-group" id="live-actions-group" hidden>
+      <div class="metric-group-header">
+        <h3>Action Log</h3>
+      </div>
+      <ul class="metric-list" id="live-actions"></ul>
+    </div>
+
+    <div class="metric-group" id="live-warnings-group" hidden>
+      <div class="metric-group-header">
+        <h3>Warnings</h3>
+      </div>
+      <ul class="metric-list" id="live-warnings"></ul>
+    </div>
+  </section>
+</section>
+{% endblock %}
